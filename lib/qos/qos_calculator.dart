@@ -1,14 +1,14 @@
 import 'dart:math';
 
 class QoSCalculator {
-    static double calculateThroughput(int deltaBytes, double intervalSeconds) {
-    if (intervalSeconds <= 0) return 0;
+  //   static double calculateThroughput(int deltaBytes, double intervalSeconds) {
+  //   if (intervalSeconds <= 0) return 0;
 
-    final bits = deltaBytes * 8;
-    final kbps = bits / 1000 / intervalSeconds;
+  //   final bits = deltaBytes * 8;
+  //   final kbps = bits / 1000 / intervalSeconds;
 
-    return kbps;
-  }
+  //   return kbps;
+  // }
 
 
   static double calculateSINR({

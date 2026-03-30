@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import '../models/data_qos.dart';
+import 'stability.dart';
 
 class MonitoringPage extends StatefulWidget {
   final DataQoS? data;
@@ -31,6 +32,13 @@ class _MonitoringPageState extends State<MonitoringPage> {
   void didUpdateWidget(covariant MonitoringPage oldWidget) {
     super.didUpdateWidget(oldWidget);
 
+     if (!widget.isMonitoring) {
+      throughputHistory.clear();
+      timestamps.clear();
+      qosHistory.clear();
+      return;
+    }
+
     if (widget.data != null) {
       final data = widget.data!;
       final value = data.throughput / 1000;
@@ -43,10 +51,15 @@ class _MonitoringPageState extends State<MonitoringPage> {
         throughputHistory.removeAt(0);
         timestamps.removeAt(0);
       }
+
+      if (qosHistory.length > 60) {
+        qosHistory.removeAt(0);
+      }
     }
   }
 
   // ================= STATISTIK =================
+
   double get avg30min {
     if (throughputHistory.isEmpty) return 0;
     return throughputHistory.reduce((a, b) => a + b) / throughputHistory.length;
@@ -59,6 +72,7 @@ class _MonitoringPageState extends State<MonitoringPage> {
       throughputHistory.isEmpty ? 0 : throughputHistory.reduce((a, b) => a < b ? a : b);
 
   // ================= TIPHON =================
+
   String kategoriDelay(double v) {
     if (v < 150) return "Sangat Baik";
     if (v < 300) return "Baik";
@@ -102,6 +116,8 @@ class _MonitoringPageState extends State<MonitoringPage> {
     }
   }
 
+  // ================= PARAMETER BOX =================
+
   Widget parameterBox(
     String title,
     double value,
@@ -121,13 +137,18 @@ class _MonitoringPageState extends State<MonitoringPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+
           Text(title, style: const TextStyle(fontSize: 12, color: textSecondary)),
+
           const SizedBox(height: 6),
+
           Text(
             "${value.toStringAsFixed(2)} $unit",
             style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: color),
           ),
+
           const SizedBox(height: 6),
+
           LinearProgressIndicator(
             value: kategori == "Buruk"
                 ? 0.25
@@ -141,23 +162,47 @@ class _MonitoringPageState extends State<MonitoringPage> {
             backgroundColor: Colors.grey.shade200,
             color: color,
           ),
+
           const SizedBox(height: 6),
-          Text("Threshold: $threshold", style: const TextStyle(fontSize: 10, color: textSecondary)),
-          Text(kategori, style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 12)),
+
+          Text(
+            "Threshold: $threshold",
+            style: const TextStyle(fontSize: 10, color: textSecondary),
+          ),
+
+          Text(
+            kategori,
+            style: TextStyle(
+              color: color,
+              fontWeight: FontWeight.bold,
+              fontSize: 12,
+            ),
+          ),
         ],
       ),
     );
   }
 
+  // ================= CHART =================
+
   Widget throughputChart() {
     return Container(
       padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(18)),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text("Kecepatan Unduh Realtime", style: TextStyle(fontWeight: FontWeight.bold)),
+
+          const Text(
+            "Kecepatan Unduh Realtime",
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+
           const SizedBox(height: 10),
+
           SizedBox(
             height: 160,
             child: LineChart(
@@ -166,15 +211,21 @@ class _MonitoringPageState extends State<MonitoringPage> {
                 borderData: FlBorderData(show: false),
                 titlesData: FlTitlesData(show: false),
                 lineBarsData: [
+
                   LineChartBarData(
                     isCurved: true,
+                    color: primary,
+                    barWidth: 3,
                     dotData: FlDotData(show: false),
-                    spots: throughputHistory
-                        .asMap()
-                        .entries
-                        .map((e) => FlSpot(e.key.toDouble(), e.value))
-                        .toList(),
+                    spots: throughputHistory.isEmpty
+                        ? [const FlSpot(0, 0)]
+                        : throughputHistory
+                            .asMap()
+                            .entries
+                            .map((e) => FlSpot(e.key.toDouble(), e.value))
+                            .toList(),
                   )
+
                 ],
               ),
             ),
@@ -184,17 +235,28 @@ class _MonitoringPageState extends State<MonitoringPage> {
     );
   }
 
+  // ================= STAT CARD =================
+
   Widget statCard(String title, double value) {
     return Expanded(
       child: Container(
         padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14)),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(14),
+        ),
         child: Column(
           children: [
+
             Text(title, style: const TextStyle(fontSize: 11, color: textSecondary)),
+
             const SizedBox(height: 6),
-            Text(value.toStringAsFixed(2),
-                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+
+            Text(
+              value.toStringAsFixed(2),
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+
             const Text("Mbps", style: TextStyle(fontSize: 10))
           ],
         ),
@@ -202,40 +264,50 @@ class _MonitoringPageState extends State<MonitoringPage> {
     );
   }
 
+  // ================= BUILD =================
+
   @override
   Widget build(BuildContext context) {
+
     final throughput = (widget.data?.throughput ?? 0) / 1000;
     final delay = widget.data?.delay ?? 0;
     final jitter = widget.data?.jitter ?? 0;
     final sinr = widget.data?.sinr ?? 0;
 
-    return Container(
-      color: bg,
-      child: widget.data == null
+    return Scaffold(
+      backgroundColor: bg,
+      body: widget.data == null
           ? const Center(child: Text("Monitoring belum aktif"))
           : SingleChildScrollView(
               padding: const EdgeInsets.all(20),
               child: Column(
                 children: [
 
-                  // NILAI UTAMA
                   Container(
                     padding: const EdgeInsets.all(20),
                     decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(18)),
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(18),
+                    ),
                     child: Column(
                       children: [
-                        const Text("Kecepatan Unduh",
-                            style: TextStyle(color: textSecondary)),
+
+                        const Text(
+                          "Kecepatan Unduh",
+                          style: TextStyle(color: textSecondary),
+                        ),
+
                         const SizedBox(height: 6),
+
                         Text(
                           throughput.toStringAsFixed(2),
                           style: const TextStyle(
-                              fontSize: 42,
-                              fontWeight: FontWeight.bold,
-                              color: primary),
+                            fontSize: 42,
+                            fontWeight: FontWeight.bold,
+                            color: primary,
+                          ),
                         ),
+
                         const Text("Mbps"),
                       ],
                     ),
@@ -251,14 +323,39 @@ class _MonitoringPageState extends State<MonitoringPage> {
                     mainAxisSpacing: 12,
                     childAspectRatio: 1.2,
                     children: [
-                      parameterBox("Throughput", throughput, "Mbps",
-                          kategoriThroughput(throughput), ">10 Mbps"),
+
                       parameterBox(
-                          "Delay", delay, "ms", kategoriDelay(delay), "<150 ms"),
-                      parameterBox("Jitter", jitter, "ms",
-                          kategoriJitter(jitter), "<75 ms"),
+                        "Throughput",
+                        throughput,
+                        "Mbps",
+                        kategoriThroughput(throughput),
+                        ">10 Mbps",
+                      ),
+
                       parameterBox(
-                          "SINR", sinr, "dB", kategoriSINR(sinr), ">20 dB"),
+                        "Delay",
+                        delay,
+                        "ms",
+                        kategoriDelay(delay),
+                        "<150 ms",
+                      ),
+
+                      parameterBox(
+                        "Jitter",
+                        jitter,
+                        "ms",
+                        kategoriJitter(jitter),
+                        "<75 ms",
+                      ),
+
+                      parameterBox(
+                        "SINR",
+                        sinr,
+                        "dB",
+                        kategoriSINR(sinr),
+                        ">20 dB",
+                      ),
+
                     ],
                   ),
 
@@ -270,13 +367,44 @@ class _MonitoringPageState extends State<MonitoringPage> {
 
                   Row(
                     children: [
-                      statCard("Rata-rata 30 menit", avg30min),
+
+                      statCard("Rata-rata", avg30min),
+
                       const SizedBox(width: 10),
-                      statCard("Tertinggi Hari Ini", maxToday),
+
+                      statCard("Tertinggi", maxToday),
+
                       const SizedBox(width: 10),
-                      statCard("Terendah Hari Ini", minToday),
+
+                      statCard("Terendah", minToday),
+
                     ],
                   ),
+
+                  const SizedBox(height: 25),
+
+                  ElevatedButton.icon(
+                    onPressed: () {
+
+                      if (widget.data != null) {
+
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => StabilityPage(
+                              qos: widget.data!,
+                              qosIndex: null,
+                            ),
+                          ),
+                        );
+
+                      }
+
+                    },
+                    icon: const Icon(Icons.analytics),
+                    label: const Text("Network Stability Analysis"),
+                  ),
+
                 ],
               ),
             ),

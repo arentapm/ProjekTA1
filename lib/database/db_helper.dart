@@ -1,5 +1,6 @@
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
+import '../models/data_qos.dart';
 
 class DBHelper {
   static Database? _db;
@@ -35,7 +36,7 @@ class DBHelper {
           sinr REAL
         )
         ''');
-
+        // ================= TABLE QoS INDEX =================
         await db.execute('''
         CREATE TABLE qos_stability_index (
           idQosIndex INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,7 +46,7 @@ class DBHelper {
           FOREIGN KEY (id_qos) REFERENCES data_qos(id_qos)
         )
         ''');
-
+         // ================= TABLE MODEL =================
         await db.execute('''
         CREATE TABLE model_prediksi (
           id_model INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,7 +55,7 @@ class DBHelper {
           created_at TEXT
         )
         ''');
-
+        // ================= TABLE STATUS =================
         await db.execute('''
         CREATE TABLE status_sistem (
           id_status_sistem INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,10 +84,74 @@ class DBHelper {
   }
 
   // ================= GET ALL QoS =================
-  static Future<List<Map<String, dynamic>>> getQoS() async {
+  static Future<List<Map<String, dynamic>>> getAllQoS() async {
     final db = await database;
     return await db.query("data_qos", orderBy: "id_qos DESC");
   }
+
+   // ================= GET DATA TERAKHIR =================
+  // digunakan untuk LSTM window
+
+  static Future<List<Map<String, dynamic>>> getLastQoS(int limit) async {
+
+    final db = await database;
+
+    return await db.query(
+      "data_qos",
+      orderBy: "id_qos DESC",
+      limit: limit,
+    );
+  }
+
+  // ================= GET SEQUENCE UNTUK LSTM =================
+  // menghasilkan format [110 x 4]
+
+  static Future<List<List<double>>> getQoSSequence(int window) async {
+
+    final history = await getLastQoS(window);
+
+    if (history.length < window) {
+
+      print("⚠️ DATA HISTORI BELUM CUKUP UNTUK LSTM");
+
+      return [];
+    }
+
+    List<List<double>> sequence = history.map((row) {
+
+      return [
+
+        (row["throughput"] as num).toDouble(),
+        (row["delay"] as num).toDouble(),
+        (row["jitter"] as num).toDouble(),
+        (row["sinr"] as num).toDouble(),
+
+      ];
+
+    }).toList();
+
+    // karena query DESC, kita balik agar urutan waktu benar
+    sequence = sequence.reversed.toList();
+
+    print("✅ SEQUENCE LSTM BERHASIL DIBUAT");
+    print("Window size: ${sequence.length}");
+
+    return sequence;
+  }
+
+  static Future<List<DataQoS>> getLastNQoS(int n) async {
+
+  final db = await DBHelper.database;
+
+  final result = await db.query(
+    'data_qos',
+    orderBy: 'timestamp DESC',
+    limit: n,
+  );
+
+  return result.map((map) => DataQoS.fromMap(map)).toList();
+
+}
 
   // ================= PRINT SEMUA DATA =================
   static Future<void> debugPrintAllQoS() async {

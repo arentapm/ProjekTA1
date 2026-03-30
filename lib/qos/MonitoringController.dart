@@ -4,48 +4,134 @@ import '../services/network_service.dart';
 import '../services/delay_service.dart';
 import 'qos_calculator.dart';
 import '../database/db_helper.dart';
+import '../services/qos_predictor.dart';
 
 class MonitoringController {
 
-  Timer? _timer;
+  // ================= TIMER =================
+  Timer? _timer;               // untuk collect data tiap detik
+  Timer? _predictionTimer;     // untuk prediksi tiap 30 menit
 
   bool monitoringStatus = false;
   bool wifiStatus = false;
 
-  int _lastBytes = 0;
-  double _lastDelay = 0;
-  double _totalJitter = 0;
-  int _jitterSamples = 0;
+  bool _predicting = false;    // lock biar gak double request
 
-  // ================= WIFI =================
+  final ThroughputCalculator _throughputCalculator = ThroughputCalculator();
+
+  double _lastDelay = 0;
+
+  static const int windowSize = 110;
+
+  // ================= WIFI CHECK =================
   Future<void> checkWifiConnection() async {
     wifiStatus = await NetworkService.isWifiConnected();
   }
 
   // ================= START MONITORING =================
-  Future<void> startMonitoring(void Function(DataQoS) onData) async {
+  Future<void> startMonitoring(
+    void Function(DataQoS qos) onData,
+    void Function(Map<String, double> prediction) onPrediction, // 🔥 FIX: multi-output
+  ) async {
+
     await checkWifiConnection();
+
     if (!wifiStatus) return;
 
     monitoringStatus = true;
 
+    // ================= 1. COLLECT DATA PER DETIK =================
     _timer = Timer.periodic(const Duration(seconds: 1), (_) async {
 
       if (!monitoringStatus) return;
 
-      final qos = await collectQoSData();
+      try {
 
-      await saveQoSData(qos);
+        // ambil data QoS real-time
+        final qos = await collectQoSData();
 
-      onData(qos);
+        // simpan ke database
+        await saveQoSData(qos);
+
+        // kirim ke UI (realtime monitoring)
+        onData(qos);
+
+      } catch (e) {
+        print("Monitoring Error: $e");
+      }
 
     });
+
+    // ================= 2. PREDIKSI TIAP 30 MENIT =================
+    _predictionTimer = Timer.periodic(const Duration(minutes: 30), (_) async {
+
+      await runPrediction(onPrediction);
+
+    });
+
   }
 
   // ================= STOP MONITORING =================
   void stopMonitoring() {
     monitoringStatus = false;
     _timer?.cancel();
+    _predictionTimer?.cancel();
+  }
+
+  // ================= PREDICTION FUNCTION =================
+  Future<void> runPrediction(
+    void Function(Map<String, double>) onPrediction
+  ) async {
+
+    // 🔒 cegah request ganda
+    if (_predicting) return;
+
+    final history = await DBHelper.getLastNQoS(windowSize);
+
+    // 🔥 pastikan data cukup untuk LSTM
+    if (history.length < windowSize) {
+      print("⚠️ Data belum cukup untuk prediksi");
+      return;
+    }
+
+    _predicting = true;
+
+    try {
+
+      // ================= PREPARE SEQUENCE =================
+      final sequence = history.map((e) {
+
+        return [
+
+          // 🔥 HARUS SAMA DENGAN TRAINING
+          e.throughput,
+          e.delay,
+          e.jitter,
+          e.sinr
+
+        ];
+
+      }).toList();
+
+      // ================= CALL BACKEND =================
+      final prediction = await MLService.predict(
+        sequence: sequence,
+      );
+
+      print("📊 HASIL PREDIKSI: $prediction");
+
+      // ================= SEND KE UI =================
+      if (prediction != null) {
+        onPrediction(prediction);
+      }
+
+    } catch (e) {
+
+      print("Prediction Error: $e");
+
+    }
+
+    _predicting = false;
   }
 
   // ================= COLLECT DATA =================
@@ -53,65 +139,32 @@ class MonitoringController {
 
     final now = DateTime.now();
 
-    // ================= NETWORK COUNTER =================
-    final currentBytes = await NetworkService.getTotalBytes();
-
-    // ================= FIRST SAMPLE =================
-    if (_lastBytes == 0) {
-
-      _lastBytes = currentBytes;
-
-      final delay = await DelayService.measureDelay();
-      final signalPower = await NetworkService.getSignalPower();
-      final freq = await NetworkService.getFrequency();
-      final is5GHz = NetworkService.is5GHz(freq);
-
-      final sinr = QoSCalculator.calculateSINR(
-        signalPowerDbm: signalPower,
-        interferenceDbm: NetworkService.getInterference(is5GHz: is5GHz),
-        noiseDbm: NetworkService.getNoiseFloor(is5GHz: is5GHz),
-      );
-
-      return DataQoS(
-        timestamp: now,
-        throughput: 0,
-        delay: delay,
-        jitter: 0,
-        sinr: sinr,
-      );
-    }
-
     // ================= THROUGHPUT =================
-    final bytesDelta = (currentBytes - _lastBytes).clamp(0, 1 << 62);
-    _lastBytes = currentBytes;
-
-    final double throughput =
-        QoSCalculator.calculateThroughput(bytesDelta, 1);
+    final double throughput = await _throughputCalculator.getThroughput();
 
     // ================= DELAY =================
-    final delay = await DelayService.measureDelay();
+    double delay = await DelayService.measureDelay();
+
+    // 🔥 VALIDASI DELAY BIAR TIDAK ERROR
+    if (delay.isNaN || delay <= 0) {
+      delay = 1;
+    }
 
     // ================= JITTER =================
-    double jitterAvg = 0;
+    double jitter = 0;
 
     if (_lastDelay != 0) {
 
-      final delta = (delay - _lastDelay).abs();
+      // 🔥 FIX: pakai delta langsung (bukan akumulasi)
+      jitter = QoSCalculator.calculateJitter(_lastDelay, delay);
 
-      _totalJitter += delta;
-
-      _jitterSamples++;
-
-      jitterAvg = _totalJitter / _jitterSamples;
     }
 
     _lastDelay = delay;
 
     // ================= SIGNAL =================
     final signalPower = await NetworkService.getSignalPower();
-
     final freq = await NetworkService.getFrequency();
-
     final is5GHz = NetworkService.is5GHz(freq);
 
     final sinr = QoSCalculator.calculateSINR(
@@ -124,7 +177,7 @@ class MonitoringController {
       timestamp: now,
       throughput: throughput,
       delay: delay,
-      jitter: jitterAvg,
+      jitter: jitter,
       sinr: sinr,
     );
   }
@@ -134,13 +187,15 @@ class MonitoringController {
 
     await DBHelper.insertQoS({
 
+      // 🔥 gunakan ISO format biar urutan waktu valid
       "timestamp": qos.timestamp.toIso8601String(),
+
       "throughput": qos.throughput,
       "delay": qos.delay,
       "jitter": qos.jitter,
       "sinr": qos.sinr,
-
     });
 
   }
+
 }
