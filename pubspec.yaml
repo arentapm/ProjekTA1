@@ -45,7 +45,7 @@ dependencies:
   sqflite: ^2.2.8+4
   path: ^1.9.0
 
-  flutter_foreground_task: ^6.1.2
+  flutter_foreground_task: ^8.17.0
 
   fl_chart: ^0.66.0
 
@@ -60,6 +60,9 @@ dependencies:
 
   #INFO WIFI (RSSI, SSID, BSSID)
   network_info_plus: ^5.0.0
+
+  package_info_plus: ^8.0.0
+  device_info_plus: ^10.0.0
 
   #HTTP request (untuk delay/RTT)
   http: ^1.2.0

@@ -1,201 +1,90 @@
 import 'dart:async';
 import '../models/data_qos.dart';
-import '../services/network_service.dart';
-import '../services/delay_service.dart';
-import 'qos_calculator.dart';
 import '../database/db_helper.dart';
-import '../services/qos_predictor.dart';
+
+// ════════════════════════════════════════════════════════════════════
+// MonitoringController — HANYA untuk main isolate (UI state)
+//
+// FIX: Controller ini tidak lagi menjalankan poll atau timer sendiri.
+// Semua pengukuran dilakukan oleh QosTaskHandler di foreground service.
+// Controller ini hanya menyimpan data terakhir yang diterima dari
+// sendDataToMain, dan menyediakan getter untuk UI.
+// ════════════════════════════════════════════════════════════════════
 
 class MonitoringController {
+  static final MonitoringController _instance = MonitoringController._internal();
+  factory MonitoringController() => _instance;
+  MonitoringController._internal();
 
-  // ================= TIMER =================
-  Timer? _timer;               // untuk collect data tiap detik
-  Timer? _predictionTimer;     // untuk prediksi tiap 30 menit
+  // Data terakhir dari foreground service
+  DataQoS? _latestFromService;
+  double? lastPrediction;
+  Map<String, dynamic>? lastEvaluation;
 
-  bool monitoringStatus = false;
-  bool wifiStatus = false;
+  String _cachedSSID = 'Unknown';
+  String _cachedIP   = '0.0.0.0';
+  String _cachedBand = 'Unknown';
 
-  bool _predicting = false;    // lock biar gak double request
+  int _mlBufferLength    = 0;
+  int _exportBufferLength = 0;
 
-  final ThroughputCalculator _throughputCalculator = ThroughputCalculator();
+  // ── Getters ───────────────────────────────────────────────────
+  DataQoS? get latest          => _latestFromService;
+  String   get cachedSSID      => _cachedSSID;
+  String   get cachedIP        => _cachedIP;
+  String   get cachedBand      => _cachedBand;
+  int      get mlBufferLength  => _mlBufferLength;
+  int      get exportBufferLength => _exportBufferLength;
 
-  double _lastDelay = 0;
+  // ── History untuk chart (dari DB langsung) ────────────────────
+  final List<DataQoS> history = [];
 
-  static const int windowSize = 110;
+  // ── Update dari data yang diterima foreground service ─────────
+  // Panggil ini dari onReceiveTaskData di widget/page utama
+  void updateFromServiceData(Map<String, dynamic> data) {
+    final hasData = data['hasData'] as bool? ?? false;
 
-  // ================= WIFI CHECK =================
-  Future<void> checkWifiConnection() async {
-    wifiStatus = await NetworkService.isWifiConnected();
-  }
-
-  // ================= START MONITORING =================
-  Future<void> startMonitoring(
-    void Function(DataQoS qos) onData,
-    void Function(Map<String, double> prediction) onPrediction, // 🔥 FIX: multi-output
-  ) async {
-
-    await checkWifiConnection();
-
-    if (!wifiStatus) return;
-
-    monitoringStatus = true;
-
-    // ================= 1. COLLECT DATA PER DETIK =================
-    _timer = Timer.periodic(const Duration(seconds: 1), (_) async {
-
-      if (!monitoringStatus) return;
-
-      try {
-
-        // ambil data QoS real-time
-        final qos = await collectQoSData();
-
-        // simpan ke database
-        await saveQoSData(qos);
-
-        // kirim ke UI (realtime monitoring)
-        onData(qos);
-
-      } catch (e) {
-        print("Monitoring Error: $e");
-      }
-
-    });
-
-    // ================= 2. PREDIKSI TIAP 30 MENIT =================
-    _predictionTimer = Timer.periodic(const Duration(minutes: 30), (_) async {
-
-      await runPrediction(onPrediction);
-
-    });
-
-  }
-
-  // ================= STOP MONITORING =================
-  void stopMonitoring() {
-    monitoringStatus = false;
-    _timer?.cancel();
-    _predictionTimer?.cancel();
-  }
-
-  // ================= PREDICTION FUNCTION =================
-  Future<void> runPrediction(
-    void Function(Map<String, double>) onPrediction
-  ) async {
-
-    // 🔒 cegah request ganda
-    if (_predicting) return;
-
-    final history = await DBHelper.getLastNQoS(windowSize);
-
-    // 🔥 pastikan data cukup untuk LSTM
-    if (history.length < windowSize) {
-      print("⚠️ Data belum cukup untuk prediksi");
-      return;
-    }
-
-    _predicting = true;
-
-    try {
-
-      // ================= PREPARE SEQUENCE =================
-      final sequence = history.map((e) {
-
-        return [
-
-          // 🔥 HARUS SAMA DENGAN TRAINING
-          e.throughput,
-          e.delay,
-          e.jitter,
-          e.sinr
-
-        ];
-
-      }).toList();
-
-      // ================= CALL BACKEND =================
-      final prediction = await MLService.predict(
-        sequence: sequence,
+    if (hasData) {
+      final ts = data['timestamp'] as String?;
+      _latestFromService = DataQoS(
+        timestamp:  ts != null && ts.isNotEmpty
+                      ? DateTime.parse(ts)
+                      : DateTime.now(),
+        throughput: (data['throughput'] as num?)?.toDouble() ?? 0.0,
+        delay:      (data['delay'] as num?)?.toDouble() ?? 0.0,
+        jitter:     (data['jitter'] as num?)?.toDouble() ?? 0.0,
+        sinr:       (data['sinr'] as num?)?.toDouble() ?? 0.0,
       );
 
-      print("📊 HASIL PREDIKSI: $prediction");
+      if (history.length >= 150) history.removeAt(0);
+      history.add(_latestFromService!);
+    }
 
-      // ================= SEND KE UI =================
-      if (prediction != null) {
-        onPrediction(prediction);
-      }
+    _cachedSSID          = data['ssid'] as String? ?? 'Unknown';
+    _cachedIP            = data['ip']   as String? ?? '0.0.0.0';
+    _cachedBand          = data['band'] as String? ?? 'Unknown';
+    _mlBufferLength      = data['mlLen'] as int? ?? 0;
+    _exportBufferLength  = data['exportLen'] as int? ?? 0;
+    lastPrediction       = (data['prediction'] as num?)?.toDouble();
+    lastEvaluation       = data['evaluation'] as Map<String, dynamic>?;
+  }
 
+  // ── Load history dari DB untuk chart ─────────────────────────
+  Future<void> loadHistoryFromDB({int days = 1}) async {
+    try {
+      final rows = await DBHelper.getHistory(days: days);
+      history.clear();
+      history.addAll(rows);
+      print('[Controller] loadHistoryFromDB: ${history.length} baris');
     } catch (e) {
-
-      print("Prediction Error: $e");
-
+      print('[Controller] loadHistoryFromDB error: $e');
     }
-
-    _predicting = false;
   }
 
-  // ================= COLLECT DATA =================
-  Future<DataQoS> collectQoSData() async {
-
-    final now = DateTime.now();
-
-    // ================= THROUGHPUT =================
-    final double throughput = await _throughputCalculator.getThroughput();
-
-    // ================= DELAY =================
-    double delay = await DelayService.measureDelay();
-
-    // 🔥 VALIDASI DELAY BIAR TIDAK ERROR
-    if (delay.isNaN || delay <= 0) {
-      delay = 1;
-    }
-
-    // ================= JITTER =================
-    double jitter = 0;
-
-    if (_lastDelay != 0) {
-
-      // 🔥 FIX: pakai delta langsung (bukan akumulasi)
-      jitter = QoSCalculator.calculateJitter(_lastDelay, delay);
-
-    }
-
-    _lastDelay = delay;
-
-    // ================= SIGNAL =================
-    final signalPower = await NetworkService.getSignalPower();
-    final freq = await NetworkService.getFrequency();
-    final is5GHz = NetworkService.is5GHz(freq);
-
-    final sinr = QoSCalculator.calculateSINR(
-      signalPowerDbm: signalPower,
-      interferenceDbm: NetworkService.getInterference(is5GHz: is5GHz),
-      noiseDbm: NetworkService.getNoiseFloor(is5GHz: is5GHz),
-    );
-
-    return DataQoS(
-      timestamp: now,
-      throughput: throughput,
-      delay: delay,
-      jitter: jitter,
-      sinr: sinr,
-    );
+  void clearHistory() {
+    history.clear();
+    _latestFromService = null;
+    lastPrediction     = null;
+    lastEvaluation     = null;
   }
-
-  // ================= SAVE DATABASE =================
-  Future<void> saveQoSData(DataQoS qos) async {
-
-    await DBHelper.insertQoS({
-
-      // 🔥 gunakan ISO format biar urutan waktu valid
-      "timestamp": qos.timestamp.toIso8601String(),
-
-      "throughput": qos.throughput,
-      "delay": qos.delay,
-      "jitter": qos.jitter,
-      "sinr": qos.sinr,
-    });
-
-  }
-
 }

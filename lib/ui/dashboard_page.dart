@@ -1,11 +1,33 @@
+// ════════════════════════════════════════════════════════════════════
+// dashboard_page.dart
+//
+// UI utama. Menerima data dari background isolate via:
+//   FlutterForegroundTask.addTaskDataCallback(_onDataReceived)
+//
+// API v8+:
+//   TIDAK pakai ReceivePort / SendPort manual.
+//   Background kirim → FlutterForegroundTask.sendDataToMain(map)
+//   UI terima       → addTaskDataCallback((data) { ... })
+//
+// PENTING: Map yang dikirim hanya boleh berisi tipe primitif
+//   (String, int, double, bool, List, Map) karena melewati isolate boundary.
+//   Objek seperti DataQoS harus direkonstruksi di sisi UI dari primitive.
+// ════════════════════════════════════════════════════════════════════
+
 import 'package:flutter/material.dart';
-import '../qos/MonitoringController.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import '../models/data_qos.dart';
-import '../services/network_service.dart';
-import '../ui/status.dart';
-import '../ui/Monitoring_page.dart';
-import '../ui/stability.dart';
-// import '../services/qos_predictor.dart';
+import '../services/qos_foreground_service.dart';
+import 'status.dart';
+import 'monitoring_page.dart';
+import 'stability.dart';
+import '../qos/MonitoringController.dart';
+
+const _primary    = Color(0xFF185FA5);
+const _colorGreen = Color(0xFF3B6D11);
+const _colorRed   = Color(0xFFA32D2D);
+const _bgPage     = Color(0xFFF2F4F8);
+const _textSec    = Color(0xFF6B7280);
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -16,424 +38,866 @@ class DashboardPage extends StatefulWidget {
 
 class _DashboardPageState extends State<DashboardPage> {
 
-  int _selectedIndex = 0;
+  // ── State data dari background ────────────────────────────────────────
+  DataQoS?              _latestQoS;
+  double?               _prediction;
+  Map<String, dynamic>? _evalMetrics;
+  int                   _mlBufferLength     = 0;
+  int                   _exportBufferLength = 0;
+  String? _ssid;
+  String? _ip;
+  String? _band;
 
-  final MonitoringController _controller = MonitoringController();
+  // ── History lokal untuk grafik ────────────────────────────────────────
+  final List<DataQoS> _localHistory = [];
+  static const int _maxLocalHistory = 150;
 
-  DataQoS? _current;
-  bool _isMonitoring = false;
+  // ── State UI ──────────────────────────────────────────────────────────
+  bool _isMonitoring  = false;
+  int  _selectedIndex = 0;
 
-  // 🔥 FIX: dari double → Map (multi prediction)
-  Map<String, double>? _predictions;
-
-  final List<DataQoS> _qosHistory = [];
-
-  // ================= INIT =================
+  // ════════════════════════════════════════════════════════════════════
+  // LIFECYCLE
+  // ════════════════════════════════════════════════════════════════════
 
   @override
   void initState() {
     super.initState();
+    // v8+: daftarkan callback penerima data dari background
+    FlutterForegroundTask.addTaskDataCallback(_onDataReceived);
+    _checkServiceRunning();
   }
 
-  // ================= NAVIGATION =================
-
-  void _onItemTapped(int index) {
-    setState(() => _selectedIndex = index);
+  @override
+  void dispose() {
+    // v8+: hapus callback saat widget dispose
+    FlutterForegroundTask.removeTaskDataCallback(_onDataReceived);
+    super.dispose();
   }
 
-  // ================= START MONITORING =================
+  Future<void> _checkServiceRunning() async {
+    final running = await FlutterForegroundTask.isRunningService;
+    if (running && mounted) {
+      setState(() => _isMonitoring = true);
+    }
+  }
 
-  Future<void> _startMonitoring() async {
+  // ════════════════════════════════════════════════════════════════════
+  // TERIMA DATA DARI BACKGROUND
+  // v8+: callback ini dipanggil otomatis saat background
+  //       memanggil FlutterForegroundTask.sendDataToMain(...)
+  // ════════════════════════════════════════════════════════════════════
 
-    await NetworkService.requestPermission();
+  void _onDataReceived(Object data) {
+    if (!mounted || data is! Map) return;
 
-    await _controller.startMonitoring(
+    final map     = Map<String, dynamic>.from(data);
+    final hasData = map['hasData'] as bool? ?? false;
+    if (!hasData) return;
 
-      // ================= DATA CALLBACK =================
-      (result) async {
+    MonitoringController().updateFromServiceData(map); 
 
-        final ssid = await NetworkService.getSSID();
-        final ip = await NetworkService.getIPAddress();
-        final freq = await NetworkService.getFrequency();
-        final band = NetworkService.getFrequencyBand(freq);
-
-        if (!mounted) return;
-
-        final newData = DataQoS(
-          timestamp: DateTime.now(),
-          throughput: result.throughput,
-          delay: result.delay,
-          jitter: result.jitter,
-          sinr: result.sinr,
-          ssid: ssid,
-          ip: ip,
-          band: band,
-        );
-
-        setState(() {
-
-          _isMonitoring = true;
-
-          _current = newData;
-
-          _qosHistory.add(newData);
-
-        });
-
-      },
-
-      // ================= PREDICTION CALLBACK =================
-      (prediction) {
-
-        if (!mounted) return;
-
-        setState(() {
-          _predictions = prediction; // ✅ FIX
-        });
-
-      },
-
+    // Rekonstruksi DataQoS dari tipe primitif
+    // (objek Dart tidak bisa melewati batas isolate secara langsung)
+    final qos = DataQoS(
+      timestamp:  DateTime.tryParse(map['timestamp'] as String? ?? '')
+                      ?? DateTime.now(),
+      throughput: (map['throughput'] as num?)?.toDouble() ?? 0.0,
+      delay:      (map['delay']      as num?)?.toDouble() ?? 0.0,
+      jitter:     (map['jitter']     as num?)?.toDouble() ?? 0.0,
+      sinr:       (map['sinr']       as num?)?.toDouble() ?? 0.0,
     );
 
+    setState(() {
+      _latestQoS          = qos;
+      _mlBufferLength     = (map['mlLen']     as int?) ?? 0;
+      _exportBufferLength = (map['exportLen'] as int?) ?? 0;
+      _ssid = map['ssid'] as String?;
+      _ip   = map['ip']   as String?;
+      _band = map['band'] as String?;
+
+      if (map['prediction'] != null) {
+        _prediction  = (map['prediction'] as num?)?.toDouble();
+        _evalMetrics = map['evaluation'] as Map<String, dynamic>?;
+      }
+
+      if (_localHistory.length >= _maxLocalHistory) {
+        _localHistory.removeAt(0);
+      }
+      _localHistory.add(qos);
+    });
   }
 
-  // ================= STOP MONITORING =================
+  // ════════════════════════════════════════════════════════════════════
+  // START MONITORING
+  // ════════════════════════════════════════════════════════════════════
 
-  void _stopMonitoring() {
+  Future<void> _startMonitoring() async {
+    if (_isMonitoring) return;
 
-    _controller.stopMonitoring();
+    // v8+: ForegroundTaskOptions wajib pakai eventAction, bukan interval
+    FlutterForegroundTask.init(
+      androidNotificationOptions: AndroidNotificationOptions(
+        channelId: 'qos_monitoring_channel',
+        channelName: 'Network QoS Monitoring',
+        channelDescription: 'Monitoring jaringan berjalan di latar belakang',
+        channelImportance: NotificationChannelImportance.LOW,
+        priority: NotificationPriority.LOW,
+        playSound: false,
+        // v8+: buttons dihapus dari AndroidNotificationOptions
+        // Gunakan onNotificationButtonPressed di TaskHandler
+      ),
+      iosNotificationOptions: const IOSNotificationOptions(
+        showNotification: true,
+      ),
+      foregroundTaskOptions: ForegroundTaskOptions(
+        // v8+: wajib pakai eventAction (bukan interval)
+        eventAction: ForegroundTaskEventAction.repeat(1000), // tiap 1 detik
+        autoRunOnBoot: true,
+        autoRunOnMyPackageReplaced: true,
+        allowWakeLock: true,
+        allowWifiLock: true,
+      ),
+    );
+
+    await FlutterForegroundTask.requestNotificationPermission();
+
+    // v8+: startService wajib pakai serviceId
+    final result = await FlutterForegroundTask.startService(
+      serviceId: 100,
+      notificationTitle: 'QoS Monitoring Aktif',
+      notificationText:  'Mengumpulkan data jaringan...',
+      callback: startCallback,
+    );
+
+    // v8+: result adalah ServiceRequestResult (enum), bukan bool
+    // Cek dengan == bukan dengan !result
+    if (result is! ServiceRequestSuccess) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Gagal memulai monitoring: $result')),
+      );
+      return;
+    }
+
+    setState(() => _isMonitoring = true);
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // STOP MONITORING
+  // ════════════════════════════════════════════════════════════════════
+
+  Future<void> _stopMonitoring() async {
+    if (!_isMonitoring) return;
+
+    await FlutterForegroundTask.stopService();
 
     if (!mounted) return;
 
     setState(() {
-
-      _isMonitoring = false;
-      _current = null;
-      _predictions = null; // 🔥 reset juga
-      _selectedIndex = 0;
-
+      _isMonitoring       = false;
+      _latestQoS          = null;
+      _prediction         = null;
+      _evalMetrics        = null;
+      _mlBufferLength     = 0;
+      _exportBufferLength = 0;
+      _selectedIndex      = 0;
+      _localHistory.clear();
     });
 
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("Monitoring dihentikan")),
+      const SnackBar(content: Text('Monitoring dihentikan')),
     );
-
   }
 
-  // ================= DASHBOARD CONTENT =================
+  // ════════════════════════════════════════════════════════════════════
+  // NAVIGASI
+  // ════════════════════════════════════════════════════════════════════
+
+  void _onItemTapped(int index) {
+    if (!_isMonitoring && index != 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Aktifkan monitoring terlebih dahulu'),
+          duration: Duration(seconds: 1),
+        ),
+      );
+      return;
+    }
+    setState(() => _selectedIndex = index);
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // BUILD
+  // ════════════════════════════════════════════════════════════════════
+
+  @override
+  Widget build(BuildContext context) {
+    final historySnapshot = List<DataQoS>.unmodifiable(_localHistory);
+
+    final pages = [
+      _dashboardContent(),
+
+      !_isMonitoring
+          ? _placeholderPage('Monitoring belum aktif')
+          : MonitoringPage(
+              data:         _latestQoS,
+              isMonitoring: _isMonitoring,
+              qosHistory:   historySnapshot,
+              wiFiSnapshot: null,
+            ),
+
+      !_isMonitoring || _latestQoS == null
+          ? _placeholderPage('Belum ada data prediksi')
+          : StabilityPage(
+              qos:              _latestQoS!,
+              qosHistory:       historySnapshot,
+              predictionSeries: const [],
+              prediction:       _prediction,
+              evalMetrics:      _evalMetrics,
+            ),
+
+      !_isMonitoring
+          ? _placeholderPage('Monitoring belum aktif')
+          : SystemStatusPage(
+              exportBuffer: historySnapshot,
+            ),
+    ];
+
+    return Scaffold(
+      backgroundColor: _bgPage,
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        elevation: 0,
+        centerTitle: false,
+        title: Row(
+          children: [
+            Container(
+              width: 32, height: 32,
+              decoration: BoxDecoration(
+                color: const Color(0xFFE6F1FB),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Icon(Icons.wifi_rounded, color: _primary, size: 17),
+            ),
+            const SizedBox(width: 10),
+            const Text(
+              'QoS Monitoring WiFi',
+              style: TextStyle(
+                color: Colors.black87,
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1),
+          child: Divider(height: 1, color: Colors.grey.shade200),
+        ),
+      ),
+      body: pages[_selectedIndex],
+      bottomNavigationBar: Container(
+        decoration: BoxDecoration(
+          color: Colors.white,
+          border: Border(top: BorderSide(color: Colors.grey.shade200)),
+        ),
+        child: BottomNavigationBar(
+          currentIndex: _selectedIndex,
+          onTap: _onItemTapped,
+          type: BottomNavigationBarType.fixed,
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          selectedItemColor: _primary,
+          unselectedItemColor: Colors.grey.shade400,
+          selectedLabelStyle:
+              const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+          unselectedLabelStyle: const TextStyle(fontSize: 11),
+          items: const [
+            BottomNavigationBarItem(
+              icon: Icon(Icons.dashboard_outlined),
+              activeIcon: Icon(Icons.dashboard_rounded),
+              label: 'Dashboard',
+            ),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.wifi_outlined),
+              activeIcon: Icon(Icons.wifi_rounded),
+              label: 'Monitoring',
+            ),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.speed_outlined),
+              activeIcon: Icon(Icons.speed_rounded),
+              label: 'Stability',
+            ),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.info_outline_rounded),
+              activeIcon: Icon(Icons.info_rounded),
+              label: 'Status',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // WIDGET — DASHBOARD CONTENT
+  // ════════════════════════════════════════════════════════════════════
 
   Widget _dashboardContent() {
-
     return Container(
-      color: const Color(0xffF5F7FB),
-
+      color: _bgPage,
       child: SingleChildScrollView(
-
-        padding: const EdgeInsets.all(20),
-
-        child: Column(
-          children: [
-
-            _monitorCard(),
-
-            const SizedBox(height: 20),
-
-            if (_current != null) ...[
-
-              _wifiInfoCard(),
-
-              const SizedBox(height: 20),
-
-              _parameterGrid(),
-
-            ]
-            else
-              _warningCard(),
-
-          ],
-        ),
-      ),
-    );
-  }
-
-  // ================= MONITOR CARD =================
-
-  Widget _monitorCard() {
-
-    return Card(
-      elevation: 4,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-
-      child: Padding(
-        padding: const EdgeInsets.all(18),
-
-        child: Column(
-          children: [
-
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-
-              children: [
-
-                const Text(
-                  "Status Monitoring",
-                  style: TextStyle(fontWeight: FontWeight.w500),
-                ),
-
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 6,
-                  ),
-
-                  decoration: BoxDecoration(
-                    color: _isMonitoring ? Colors.green[50] : Colors.red[50],
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-
-                  child: Text(
-                    _isMonitoring ? "Aktif" : "Tidak Aktif",
-                    style: TextStyle(
-                      color: _isMonitoring ? Colors.green : Colors.red,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                )
-
-              ],
-            ),
-
-            const SizedBox(height: 14),
-
-            SizedBox(
-              width: double.infinity,
-              height: 45,
-
-              child: ElevatedButton(
-
-                onPressed:
-                    _isMonitoring ? _stopMonitoring : _startMonitoring,
-
-                style: ElevatedButton.styleFrom(
-                  backgroundColor:
-                      _isMonitoring ? Colors.red : const Color(0xff4A6CF7),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-
-                child: Text(
-                  _isMonitoring
-                      ? "Stop Monitoring"
-                      : "Aktifkan Monitoring",
-                ),
-              ),
-            )
-
-          ],
-        ),
-      ),
-    );
-  }
-
-  // ================= WARNING =================
-
-  Widget _warningCard() {
-
-    return Card(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-
-      child: const Padding(
-        padding: EdgeInsets.all(16),
-
-        child: Text(
-          "Monitoring belum aktif.\nSilahkan aktifkan monitoring untuk membaca parameter QoS jaringan WiFi.",
-          style: TextStyle(color: Colors.grey),
-        ),
-      ),
-    );
-  }
-
-  // ================= WIFI INFO =================
-
-  Widget _wifiInfoCard() {
-
-    return Card(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-
+        padding: const EdgeInsets.fromLTRB(16, 20, 16, 30),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-
           children: [
-
-            const Text(
-              "Informasi WiFi",
-              style: TextStyle(fontWeight: FontWeight.bold),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'QoS Monitor',
+                      style: TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.black87,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Jaringan WiFi — Real-time',
+                      style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+                    ),
+                  ],
+                ),
+                _statusBadge(),
+              ],
             ),
+            const SizedBox(height: 20),
+            _monitorCard(),
+            const SizedBox(height: 16),
 
-            const SizedBox(height: 8),
-
-            Text("SSID : ${_current?.ssid ?? '-'}"),
-            Text("IP   : ${_current?.ip ?? '-'}"),
-            Text("Band : ${_current?.band ?? '-'}"),
-
-            const SizedBox(height: 8),
-
-            Text("Update terakhir : ${_current?.timestamp ?? '-'}"),
-
+            if (_isMonitoring && _latestQoS != null) ...[
+              _infoCard(),
+              const SizedBox(height: 16),
+              _sectionLabel('PARAMETER QoS — TIPHON'),
+              const SizedBox(height: 10),
+              _parameterGrid(_latestQoS!),
+            ] else if (_isMonitoring && _latestQoS == null)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 32),
+                child: Center(
+                  child: Column(
+                    children: [
+                      CircularProgressIndicator(strokeWidth: 2),
+                      SizedBox(height: 12),
+                      Text(
+                        'Mengumpulkan data...',
+                        style: TextStyle(fontSize: 12, color: _textSec),
+                      ),
+                    ],
+                  ),
+                ),
+              )
+            else
+              _warningCard(),
           ],
         ),
       ),
     );
   }
 
-  // ================= PARAMETER GRID =================
+  Widget _statusBadge() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: _isMonitoring ? const Color(0xFFEAF3DE) : const Color(0xFFFCEBEB),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: _isMonitoring
+              ? _colorGreen.withOpacity(0.3)
+              : _colorRed.withOpacity(0.3),
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _PulseDot(color: _isMonitoring ? _colorGreen : _colorRed),
+          const SizedBox(width: 6),
+          Text(
+            _isMonitoring ? 'Aktif' : 'Tidak Aktif',
+            style: TextStyle(
+              color: _isMonitoring ? _colorGreen : _colorRed,
+              fontWeight: FontWeight.w600,
+              fontSize: 12,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
-  Widget _parameterGrid() {
+  Widget _monitorCard() {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 38, height: 38,
+                decoration: BoxDecoration(
+                  color: _isMonitoring
+                      ? const Color(0xFFEAF3DE)
+                      : const Color(0xFFE6F1FB),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(
+                  _isMonitoring
+                      ? Icons.sensors_rounded
+                      : Icons.sensors_off_rounded,
+                  color: _isMonitoring ? _colorGreen : _primary,
+                  size: 18,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Status Monitoring',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black87,
+                      ),
+                    ),
+                    Text(
+                      _isMonitoring
+                          ? 'Mengambil data tiap 1 detik'
+                          : 'Tekan tombol untuk memulai',
+                      style: const TextStyle(fontSize: 11, color: _textSec),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          SizedBox(
+            width: double.infinity,
+            height: 46,
+            child: ElevatedButton.icon(
+              onPressed: _isMonitoring ? _stopMonitoring : _startMonitoring,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _isMonitoring ? _colorRed : _primary,
+                foregroundColor: Colors.white,
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12)),
+              ),
+              icon: Icon(
+                _isMonitoring
+                    ? Icons.stop_circle_outlined
+                    : Icons.play_circle_outline_rounded,
+                size: 18,
+              ),
+              label: Text(
+                _isMonitoring ? 'Stop Monitoring' : 'Aktifkan Monitoring',
+                style: const TextStyle(
+                    fontSize: 14, fontWeight: FontWeight.w600),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
-    final throughputMbps = ((_current?.throughput ?? 0) / 1000);
+  Widget _infoCard() {
+    final ts        = _latestQoS!.timestamp.toString();
+    final tsDisplay = ts.length >= 19 ? ts.substring(0, 19) : ts;
+    final mlProgress = (_mlBufferLength / 1800).clamp(0.0, 1.0);
 
-    return GridView.count(
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 32, height: 32,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE6F1FB),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(Icons.wifi_rounded, color: _primary, size: 16),
+              ),
+              const SizedBox(width: 10),
+              const Text(
+                'INFORMASI SESI',
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  color: _primary,
+                  letterSpacing: 1.2,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          _infoRow(Icons.access_time_rounded, 'Update terakhir', tsDisplay),
+          const SizedBox(height: 8),
+          const SizedBox(height: 8),
+          _infoRow(Icons.wifi_rounded, 'SSID', _ssid ?? '-'),
 
-      shrinkWrap: true,
+          const SizedBox(height: 8),
+          _infoRow(Icons.language_rounded, 'IP Address', _ip ?? '-'),
 
-      crossAxisCount: 2,
+          const SizedBox(height: 8),
+          _infoRow(Icons.network_cell_rounded, 'Band', _band ?? '-'),
+          _infoRow(Icons.storage_rounded, 'Total data sesi',
+              '$_exportBufferLength sampel'),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Icon(Icons.memory_rounded, size: 14, color: Colors.grey.shade400),
+              const SizedBox(width: 8),
+              const Text('Buffer ML',
+                  style: TextStyle(fontSize: 12, color: _textSec)),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      '$_mlBufferLength / 1800',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black87,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    LinearProgressIndicator(
+                      value: mlProgress,
+                      minHeight: 3,
+                      borderRadius: BorderRadius.circular(4),
+                      backgroundColor: Colors.grey.shade200,
+                      color: mlProgress >= 1.0 ? _colorGreen : _primary,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
 
-      crossAxisSpacing: 14,
-      mainAxisSpacing: 14,
-
-      physics: const NeverScrollableScrollPhysics(),
-
+  Widget _infoRow(IconData icon, String label, String value) {
+    return Row(
       children: [
-
-        _modernParam(
-          "Throughput",
-          "${throughputMbps.toStringAsFixed(2)} Mbps",
+        Icon(icon, size: 14, color: Colors.grey.shade400),
+        const SizedBox(width: 8),
+        Text('$label  ', style: const TextStyle(fontSize: 12, color: _textSec)),
+        Expanded(
+          child: Text(
+            value,
+            textAlign: TextAlign.right,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: Colors.black87,
+            ),
+          ),
         ),
-
-        _modernParam(
-          "Delay",
-          "${(_current?.delay ?? 0).toStringAsFixed(2)} ms",
-        ),
-
-        _modernParam(
-          "Jitter",
-          "${(_current?.jitter ?? 0).toStringAsFixed(2)} ms",
-        ),
-
-        _modernParam(
-          "SINR",
-          "${(_current?.sinr ?? 0).toStringAsFixed(2)} dB",
-        ),
-
       ],
     );
   }
 
-  Widget _modernParam(String title, String value) {
+  Widget _warningCard() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 36, height: 36,
+            decoration: BoxDecoration(
+              color: const Color(0xFFFAEEDA),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: const Icon(Icons.info_outline_rounded,
+                color: Color(0xFF854F0B), size: 18),
+          ),
+          const SizedBox(width: 12),
+          const Expanded(
+            child: Text(
+              'Monitoring belum aktif.\nSilakan aktifkan monitoring untuk membaca parameter QoS jaringan WiFi.',
+              style: TextStyle(fontSize: 13, color: _textSec, height: 1.55),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
-    return Card(
-      elevation: 3,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+  Widget _sectionLabel(String label) {
+    return Text(
+      label,
+      style: const TextStyle(
+        fontSize: 11,
+        fontWeight: FontWeight.w600,
+        color: _textSec,
+        letterSpacing: 0.5,
+      ),
+    );
+  }
 
+  Widget _placeholderPage(String message) {
+    return Container(
+      color: _bgPage,
       child: Center(
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-
+          mainAxisSize: MainAxisSize.min,
           children: [
-
-            Text(title, style: const TextStyle(color: Colors.grey)),
-
-            const SizedBox(height: 6),
-
-            Text(
-              value,
-              style: const TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
+            Container(
+              width: 56, height: 56,
+              decoration: BoxDecoration(
+                color: Colors.grey.shade100,
+                borderRadius: BorderRadius.circular(16),
               ),
-            )
-
+              child: Icon(Icons.sensors_off_rounded,
+                  color: Colors.grey.shade400, size: 28),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              message,
+              style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
+            ),
           ],
         ),
       ),
     );
   }
 
-  // ================= MAIN BUILD =================
+  Widget _parameterGrid(DataQoS current) {
+    return GridView.count(
+      shrinkWrap: true,
+      crossAxisCount: 2,
+      crossAxisSpacing: 10,
+      mainAxisSpacing: 10,
+      childAspectRatio: 1.25,
+      physics: const NeverScrollableScrollPhysics(),
+      children: [
+        _paramCard('Throughput', current.throughput.toStringAsFixed(2), 'Mbps',
+            Icons.speed_rounded, _kategori('throughput', current.throughput)),
+        _paramCard('Delay', current.delay.toStringAsFixed(2), 'ms',
+            Icons.timer_outlined, _kategori('delay', current.delay)),
+        _paramCard('Jitter', current.jitter.toStringAsFixed(2), 'ms',
+            Icons.show_chart_rounded, _kategori('jitter', current.jitter)),
+        _paramCard('SINR', current.sinr.toStringAsFixed(2), 'dB',
+            Icons.signal_cellular_alt_rounded, _kategori('sinr', current.sinr)),
+      ],
+    );
+  }
+
+  String _kategori(String param, double v) {
+    switch (param) {
+      case 'throughput':
+        if (v > 10) return 'Sangat Baik';
+        if (v > 5)  return 'Baik';
+        if (v > 1)  return 'Sedang';
+        return 'Buruk';
+      case 'delay':
+        if (v == 0)  return 'Tidak Ada Data';
+        if (v < 150) return 'Sangat Baik';
+        if (v < 300) return 'Baik';
+        if (v < 450) return 'Sedang';
+        return 'Buruk';
+      case 'jitter':
+        if (v == 0)  return 'Tidak Ada Data';
+        if (v < 20)  return 'Sangat Baik';
+        if (v < 50)  return 'Baik';
+        if (v < 75)  return 'Sedang';
+        return 'Buruk';
+      case 'sinr':
+        if (v >= 25) return 'Sangat Baik';
+        if (v >= 15) return 'Baik';
+        if (v >= 10) return 'Sedang';
+        return 'Buruk';
+      default:
+        return 'Baik';
+    }
+  }
+
+  Color _kategoriColor(String k) {
+    switch (k) {
+      case 'Sangat Baik':    return _colorGreen;
+      case 'Baik':           return _primary;
+      case 'Sedang':         return const Color(0xFF854F0B);
+      case 'Buruk':          return _colorRed;
+      case 'Tidak Ada Data': return Colors.grey;
+      default:               return Colors.grey;
+    }
+  }
+
+  Color _kategoriBg(String k) {
+    switch (k) {
+      case 'Sangat Baik':    return const Color(0xFFEAF3DE);
+      case 'Baik':           return const Color(0xFFE6F1FB);
+      case 'Sedang':         return const Color(0xFFFAEEDA);
+      case 'Buruk':          return const Color(0xFFFCEBEB);
+      case 'Tidak Ada Data': return Colors.grey.shade100;
+      default:               return Colors.grey.shade100;
+    }
+  }
+
+  double _kategoriProgress(String k) {
+    switch (k) {
+      case 'Sangat Baik': return 1.0;
+      case 'Baik':        return 0.75;
+      case 'Sedang':      return 0.5;
+      case 'Buruk':       return 0.25;
+      default:            return 0.0;
+    }
+  }
+
+  Widget _paramCard(String title, String value, String unit,
+      IconData icon, String kategori) {
+    final color    = _kategoriColor(kategori);
+    final bgColor  = _kategoriBg(kategori);
+    final progress = _kategoriProgress(kategori);
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: color.withOpacity(0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Container(
+                width: 30, height: 30,
+                decoration: BoxDecoration(
+                    color: bgColor, borderRadius: BorderRadius.circular(8)),
+                child: Icon(icon, color: color, size: 15),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                decoration: BoxDecoration(
+                    color: bgColor, borderRadius: BorderRadius.circular(20)),
+                child: Text(
+                  kategori,
+                  style: TextStyle(
+                      color: color, fontSize: 8, fontWeight: FontWeight.w700),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(title, style: const TextStyle(fontSize: 11, color: _textSec)),
+          const SizedBox(height: 2),
+          RichText(
+            text: TextSpan(
+              children: [
+                TextSpan(
+                  text: value,
+                  style: TextStyle(
+                      fontSize: 20, fontWeight: FontWeight.w600, color: color),
+                ),
+                TextSpan(
+                  text: ' $unit',
+                  style: const TextStyle(
+                      fontSize: 10,
+                      color: _textSec,
+                      fontWeight: FontWeight.normal),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+          LinearProgressIndicator(
+            value: progress,
+            minHeight: 4,
+            borderRadius: BorderRadius.circular(10),
+            backgroundColor: Colors.grey.shade200,
+            color: color,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// PULSE DOT
+// ════════════════════════════════════════════════════════════════════
+
+class _PulseDot extends StatefulWidget {
+  final Color color;
+  const _PulseDot({required this.color});
+
+  @override
+  State<_PulseDot> createState() => _PulseDotState();
+}
+
+class _PulseDotState extends State<_PulseDot>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 1000))
+      ..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-
-    final pages = [
-
-      _dashboardContent(),
-
-      MonitoringPage(
-        data: _current,
-        isMonitoring: _isMonitoring,
-      ),
-
-      const Center(child: Text("Visualisasi")),
-
-      _current == null
-          ? const Center(child: Text("Belum ada data monitoring"))
-          : StabilityPage(
-              qos: _current!,
-              predictions: _predictions, // 🔥 FIX
-            ),
-
-      SystemStatusPage(qosHistory: _qosHistory),
-
-    ];
-
-    return Scaffold(
-
-      appBar: AppBar(
-        title: const Text("QoS Monitoring WiFi"),
-        backgroundColor: const Color(0xff4A6CF7),
-        elevation: 0,
-      ),
-
-      body: pages[_selectedIndex],
-
-      bottomNavigationBar: BottomNavigationBar(
-
-        currentIndex: _selectedIndex,
-
-        onTap: _onItemTapped,
-
-        type: BottomNavigationBarType.fixed,
-
-        backgroundColor: Colors.white,
-
-        elevation: 8,
-
-        selectedItemColor: const Color(0xff4A6CF7),
-
-        unselectedItemColor: Colors.grey,
-
-        items: const [
-
-          BottomNavigationBarItem(
-              icon: Icon(Icons.dashboard), label: "Dashboard"),
-
-          BottomNavigationBarItem(
-              icon: Icon(Icons.wifi), label: "Monitoring"),
-
-          BottomNavigationBarItem(
-              icon: Icon(Icons.show_chart), label: "Visualisasi"),
-
-          BottomNavigationBarItem(
-              icon: Icon(Icons.speed), label: "Stability"),
-
-          BottomNavigationBarItem(
-              icon: Icon(Icons.info), label: "Status"),
-
-        ],
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (_, __) => Container(
+        width: 8, height: 8,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: widget.color.withOpacity(0.5 + _ctrl.value * 0.5),
+        ),
       ),
     );
   }
