@@ -37,7 +37,8 @@
     <application
         android:label="flutter_application_1"
         android:name="com.example.flutter_application_1.MyApplication"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">
 
         <!-- ── Activity utama ───────────────────────────────── -->
         <activity

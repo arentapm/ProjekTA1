@@ -6,13 +6,14 @@ import 'package:device_info_plus/device_info_plus.dart';
 import 'dart:io';
 import '../models/data_qos.dart';
 import '../services/export_excel.dart';
+import '../database/db_helper.dart';
 
 const _primary    = Color(0xFF185FA5);
 const _colorGreen = Color(0xFF3B6D11);
 const _colorRed   = Color(0xFFA32D2D);
 const _bgPage     = Color(0xFFF2F4F8);
 const _textSec    = Color(0xFF6B7280);
-const String baseUrl = "http://localhost:8000";
+const String baseUrl = "http://192.168.137.1:8000";
 
 class SystemStatusPage extends StatefulWidget {
   /// exportBuffer dari MonitoringController — tidak dibatasi, akumulasi seluruh sesi.
@@ -54,6 +55,10 @@ class _SystemStatusPageState extends State<SystemStatusPage> {
   int            _totalSessions   = 1;
   Timer?         _uptimeTimer;
   Timer?         _autoRefreshTimer;
+  Timer?         _backendTimer;
+  int           _totalDbRows     = 0;
+  int _sessionRows     = 0;   
+  int _rowsAtStart     = 0; 
 
   // ── Model meta ────────────────────────────────────────────────────────
   static const String _modelVersion     = "v1.0.0";
@@ -68,11 +73,19 @@ class _SystemStatusPageState extends State<SystemStatusPage> {
     _loadDeviceInfo();
     _startUptimeTimer();
     _startAutoRefreshTimer();
+    _loadTotalDbRows();
+    _startAutoRefreshTimer(); 
+    _initDbBaseline();
 
     if (widget.exportBuffer.isNotEmpty) {
       _lastFetchTime  = DateTime.now();
       _lastFetchLabel = _timeAgoLabel(_lastFetchTime!);
     }
+  }
+
+  Future<void> _loadTotalDbRows() async {
+    final count = await getTotalQoSCount();
+    if (mounted) setState(() => _totalDbRows = count);
   }
 
   @override
@@ -103,6 +116,44 @@ class _SystemStatusPageState extends State<SystemStatusPage> {
     if (_lastExportTime != null) _lastExportLabel = _timeAgoLabel(_lastExportTime!);
   }
 
+  Future<void> _initDbBaseline() async {
+    final count = await _getDbCount();
+    if (mounted) {
+      setState(() {
+        _rowsAtStart = count;
+        _totalDbRows = count;
+        _sessionRows = 0;
+      });
+    }
+    print('[SystemStatus] baseline DB: $_rowsAtStart baris');
+  }
+
+  // ✅ Query COUNT dari DB
+  Future<int> _getDbCount() async {
+    try {
+      final db     = await DBHelper.database;
+      final result = await db.rawQuery(
+        'SELECT COUNT(*) as count FROM data_qos',
+      );
+      return (result.first['count'] as int?) ?? 0;
+    } catch (e) {
+      print('[SystemStatus] count error: $e');
+      return 0;
+    }
+  }
+
+   // ✅ Refresh count setiap interval — fix dari versi sebelumnya
+  Future<void> _refreshDbCount() async {
+    final count = await _getDbCount();
+    if (mounted) {
+      setState(() {
+        _totalDbRows = count;
+        // Data sesi = total sekarang dikurangi baseline awal
+        _sessionRows = (_totalDbRows - _rowsAtStart).clamp(0, 999999);
+      });
+    }
+  }
+
   void _startAutoRefreshTimer() {
     _autoRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted && !_isCheckingConnection) {
@@ -119,40 +170,74 @@ class _SystemStatusPageState extends State<SystemStatusPage> {
     return "${diff.inDays} hari lalu";
   }
 
-  Future<void> _checkBackendConnection({bool silent = false}) async {
-    if (!silent) {
-      setState(() {
-        _isCheckingConnection = true;
-        _isConnected          = null;
-      });
-    } else {
-      setState(() => _isCheckingConnection = true);
-    }
+// Di system_status_page.dart
+Future<void> _checkBackendConnection({bool silent = false}) async {
+  print('=== CHECK BACKEND START ===');
 
-    final stopwatch = Stopwatch()..start();
+  if (!silent) {
+    setState(() {
+      _isCheckingConnection = true;
+      _isConnected = null;
+    });
+  }
+
+  final stopwatch = Stopwatch()..start();
+
+  // Coba maksimal 3x dengan jeda
+  for (int attempt = 1; attempt <= 3; attempt++) {
     try {
+      print('REQUEST TO: $baseUrl/ (attempt $attempt)');
+
       final response = await http
           .get(Uri.parse("$baseUrl/"))
-          .timeout(const Duration(seconds: 5));
+          .timeout(const Duration(seconds: 60)); // naikkan ke 60 detik
+
       stopwatch.stop();
+      print('STATUS CODE: ${response.statusCode}');
+
       if (mounted) {
         setState(() {
-          _isConnected  = response.statusCode == 200;
+          _isConnected = response.statusCode == 200;
           _responseTime = "${stopwatch.elapsedMilliseconds} ms";
+          _isCheckingConnection = false;
         });
       }
-    } catch (_) {
-      stopwatch.stop();
-      if (mounted) {
-        setState(() {
-          _isConnected  = false;
-          _responseTime = "-";
-        });
+      return; // sukses, keluar dari loop
+
+    } on TimeoutException {
+      print('TIMEOUT attempt $attempt');
+      if (attempt < 3) {
+        await Future.delayed(const Duration(seconds: 2));
+        continue;
       }
-    } finally {
-      if (mounted) setState(() => _isCheckingConnection = false);
+      if (mounted) setState(() {
+        _isConnected = false;
+        _responseTime = "Timeout";
+        _isCheckingConnection = false;
+      });
+
+    } on SocketException catch (e) {
+      print('SOCKET ERROR: $e');
+      if (mounted) setState(() {
+        _isConnected = false;
+        _responseTime = "No Connection";
+        _isCheckingConnection = false;
+      });
+      return; // tidak perlu retry kalau memang tidak ada koneksi
+
+    } catch (e, s) {
+      print('UNKNOWN ERROR: $e\n$s');
+      if (mounted) setState(() {
+        _isConnected = false;
+        _responseTime = "Error";
+        _isCheckingConnection = false;
+      });
+      return;
     }
   }
+
+  print('=== CHECK BACKEND END ===');
+}
 
   Future<void> _loadAppInfo() async {
     try {
@@ -437,7 +522,7 @@ class _SystemStatusPageState extends State<SystemStatusPage> {
     );
   }
 
-  Widget _systemStatusCard() {
+    Widget _systemStatusCard() {
     return _baseCard(
       icon: Icons.monitor_heart_rounded,
       title: "Status Sesi & Sistem",
@@ -445,8 +530,8 @@ class _SystemStatusPageState extends State<SystemStatusPage> {
       children: [
         _infoRow(Icons.timer_outlined,        "Uptime Sesi", _uptimeString),
         const SizedBox(height: 10),
-        // ✅ Dari exportBuffer — seluruh data sesi tanpa batas
-        _infoRow(Icons.storage_rounded,       "Total Data",  "${widget.exportBuffer.length} sampel"),
+        // ✅ Pakai _totalDbRows — seluruh data di DB
+        _infoRow(Icons.storage_rounded, "Total Data", "$_totalDbRows sampel"),
         const SizedBox(height: 10),
         _infoRow(Icons.sync_rounded,          "Last Sync",   _lastFetchLabel),
         const SizedBox(height: 10),
@@ -514,7 +599,7 @@ class _SystemStatusPageState extends State<SystemStatusPage> {
                     const Spacer(),
                     // ✅ Dari exportBuffer — seluruh data sesi tanpa batas
                     Text(
-                      "${widget.exportBuffer.length} sampel",
+                      "$_totalDbRows sampel",
                       style: const TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.w600,
@@ -560,9 +645,26 @@ class _SystemStatusPageState extends State<SystemStatusPage> {
                     borderRadius: BorderRadius.circular(12)),
               ),
               onPressed: () async {
-                // ✅ Export dari exportBuffer — seluruh data sesi tanpa batas
-                final path =
-                    await exportQoSToExcelFromObject(widget.exportBuffer);
+                // ✅ Tampilkan loading dialog
+                showDialog(
+                  context: context,
+                  barrierDismissible: false,
+                  builder: (_) => const AlertDialog(
+                    content: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        CircularProgressIndicator(),
+                        SizedBox(width: 16),
+                        Text('Mengekspor data...'),
+                      ],
+                    ),
+                  ),
+                );
+
+                final path = await exportQoSToExcel();
+
+                // ✅ Tutup loading dialog
+                if (mounted) Navigator.of(context, rootNavigator: true).pop();
 
                 if (path != null) {
                   setState(() {
@@ -571,15 +673,13 @@ class _SystemStatusPageState extends State<SystemStatusPage> {
                   });
                   if (mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                          content: Text(
-                              "File Excel tersimpan di folder Download")),
+                      SnackBar(content: Text('File tersimpan: $path')),
                     );
                   }
                 } else {
                   if (mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text("Export gagal")),
+                      const SnackBar(content: Text('Export gagal')),
                     );
                   }
                 }

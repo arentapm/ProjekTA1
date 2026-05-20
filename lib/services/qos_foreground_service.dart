@@ -4,7 +4,6 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import '../services/network_service.dart';
 import '../models/data_qos.dart';
 import '../database/db_helper.dart';
-import '../services/ml_service.dart';
 
 // ════════════════════════════════════════════════════════════════════
 // QosTaskHandler — berjalan di isolate TERPISAH dari main isolate
@@ -37,21 +36,11 @@ class QosTaskHandler extends TaskHandler {
   int _mlBufferCount = 0;
   int _exportBufferCount = 0;
   double? _lastPrediction;
-  Map<String, dynamic>? _lastEvaluation;
 
   // ── Cache info WiFi ───────────────────────────────────────────
   String _cachedSSID = 'Unknown';
   String _cachedIP   = '0.0.0.0';
   String _cachedBand = 'Unknown';
-
-  // ── ML buffer (lokal di isolate ini) ─────────────────────────
-  static const int _mlBufferSize    = 1800;
-  static const int _minPredictSample = 110;
-  final List<List<double>> _mlBuffer = [];
-
-  // ── Timer ML ─────────────────────────────────────────────────
-  Timer? _mlTimer;
-  bool _isMlBusy = false;
 
   // ── Busy guard poll ───────────────────────────────────────────
   bool _isPollBusy = false;
@@ -64,10 +53,6 @@ class QosTaskHandler extends TaskHandler {
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
     print('[TaskHandler] START');
     await NetworkService.requestPermission();
-
-    _mlTimer = Timer.periodic(const Duration(minutes: 30), (_) {
-      _runMlPrediction();
-    });
   }
 
   @override
@@ -86,8 +71,6 @@ class QosTaskHandler extends TaskHandler {
   @override
   Future<void> onDestroy(DateTime timestamp) async {
     print('[TaskHandler] STOP');
-    _mlTimer?.cancel();
-    _mlBuffer.clear();
   }
 
   @override
@@ -213,9 +196,6 @@ class QosTaskHandler extends TaskHandler {
       final idQos = await DBHelper.insertQoS(qos.toMap());
       _latestQoS = qos.copyWith(idQos: idQos);
 
-      // Update ML buffer
-      _addToMlBuffer(qos);
-
       _exportBufferCount++;
       print('[TaskHandler] poll OK id_qos=$idQos '
             'T=${throughputValue.toStringAsFixed(2)} '
@@ -237,48 +217,6 @@ class QosTaskHandler extends TaskHandler {
         q.sinr.isFinite;
   }
 
-  void _addToMlBuffer(DataQoS qos) {
-    if (_mlBuffer.length >= _mlBufferSize) _mlBuffer.removeAt(0);
-    _mlBuffer.add([qos.throughput, qos.delay, qos.jitter, qos.sinr]);
-    _mlBufferCount = _mlBuffer.length;
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  // ML PREDICTION
-  // ═══════════════════════════════════════════════════════════════
-
-  Future<void> _runMlPrediction() async {
-    if (_isMlBusy) return;
-    if (_mlBuffer.length < _minPredictSample) {
-      print('[ML] data kurang: ${_mlBuffer.length}/$_minPredictSample');
-      return;
-    }
-
-    _isMlBusy = true;
-    try {
-      final result = await MLService.predictWithEvaluation(input: List.from(_mlBuffer));
-
-      if (result != null) {
-        _lastPrediction = result["prediction"];
-        _lastEvaluation = result["evaluation"];
-        print('[ML] OK: $_lastPrediction');
-
-        final latest = _latestQoS;
-        if (_lastPrediction != null && latest?.idQos != null) {
-          await DBHelper.insertStabilityIndex(
-            idQos: latest!.idQos!,
-            qosIndexValue: _lastPrediction!,
-          );
-          print('[ML] stability index disimpan OK');
-        }
-      }
-    } catch (e) {
-      print('[ML] ERROR: $e');
-    } finally {
-      _isMlBusy = false;
-    }
-  }
-
   // ═══════════════════════════════════════════════════════════════
   // KIRIM DATA KE MAIN ISOLATE
   // ═══════════════════════════════════════════════════════════════
@@ -296,7 +234,6 @@ class QosTaskHandler extends TaskHandler {
       'mlLen':      _mlBufferCount,
       'exportLen':  _exportBufferCount,
       'prediction': _lastPrediction,
-      'evaluation': _lastEvaluation,
       'ssid':       _cachedSSID,
       'ip':         _cachedIP,
       'band':       _cachedBand,

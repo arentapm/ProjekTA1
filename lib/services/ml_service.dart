@@ -1,48 +1,105 @@
-import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 class MLService {
-  static const String baseUrl = 'http://YOUR_BACKEND_URL/predict';
 
+  static const String baseUrl =
+      'http://192.168.137.1:8000';
 
-  static Future<Map<String, dynamic>?> predictWithEvaluation({
-    required List<List<double>> input,
+  static Future<Map<String, dynamic>?> runForecast({
+    required List<List<double>> inputData,
   }) async {
-    try {
-      if (input.isEmpty) return null;
 
-      final response = await http
-          .post(
-            Uri.parse(baseUrl),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({"data": input}),
-          )
-          .timeout(const Duration(seconds: 20));
+    try {
+
+      final response = await http.post(
+
+        Uri.parse('$baseUrl/predict'),
+
+        headers: {
+          'Content-Type': 'application/json',
+        },
+
+        body: jsonEncode({
+          'input': inputData,
+        }),
+      );
+
+      print('================================');
+      print('STATUS CODE: ${response.statusCode}');
+      print('RAW RESPONSE: ${response.body}');
+      print('================================');
 
       if (response.statusCode != 200) {
-        print('[ML] HTTP ERROR ${response.statusCode}');
         return null;
       }
 
-      final decoded = jsonDecode(response.body);
+      final decoded =
+          jsonDecode(response.body);
 
-      if (decoded is! Map<String, dynamic>) {
-        print('[ML] FORMAT ERROR');
+      // ==============================
+      // VALIDASI ROOT
+      // ==============================
+      if (decoded == null) {
+        print('decoded null');
         return null;
       }
+
+      // ==============================
+      // STATUS FAILED
+      // ==============================
+      if (decoded['status'] != 'completed') {
+
+        print(
+          'Backend failed: '
+          '${decoded['message']}'
+        );
+
+        return null;
+      }
+
+      // ==============================
+      // RESULT
+      // ==============================
+      final result =
+          decoded['result'];
+
+      if (result == null) {
+
+        print('result null');
+
+        return null;
+      }
+
+      print('FINAL PRED: ${result['final_prediction']}');
 
       return {
-        "prediction": (decoded["prediction"] as num?)?.toDouble(),
-        "evaluation": decoded["evaluation"] ?? {},
+        'final_prediction':
+            (result['final_prediction'] as num)
+                .toDouble(),
+
+        'series':
+            List<double>.from(
+          (result['series'] as List).map(
+            (e) => (e as num).toDouble(),
+          ),
+        ),
+
+        'forecast_time':
+            result['forecast_time']
+                .toString(),
+
+        'model':
+            result['model']
+                .toString(),
       };
 
-    } on TimeoutException {
-      print('[ML] TIMEOUT');
-    } catch (e) {
-      print('[ML] ERROR: $e');
-    }
+    } catch (e, s) {
 
-    return null;
+      print('MLService ERROR: $e');
+      print(s);
+
+      return null;
+    }
   }
 }

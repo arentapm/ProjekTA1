@@ -252,9 +252,6 @@ class _DashboardPageState extends State<DashboardPage> {
           : StabilityPage(
               qos:              _latestQoS!,
               qosHistory:       historySnapshot,
-              predictionSeries: const [],
-              prediction:       _prediction,
-              evalMetrics:      _evalMetrics,
             ),
 
       !_isMonitoring

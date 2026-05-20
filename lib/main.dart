@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'database/db_helper.dart';
-import 'models/SystemStatus.dart';
+//import 'models/SystemStatus.dart';
 import 'ui/dashboard_page.dart';
 
 void main() async {
@@ -12,7 +12,7 @@ void main() async {
   FlutterForegroundTask.initCommunicationPort();
 
   await DBHelper.database;
-  await SystemStatus.loadModel();
+  //await SystemStatus.loadModel();
 
   runApp(const MyApp());
 }

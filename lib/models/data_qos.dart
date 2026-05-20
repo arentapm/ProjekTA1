@@ -38,6 +38,7 @@ class DataQoS {
       delay:      (map['delay']      as num).toDouble(),
       jitter:     (map['jitter']     as num).toDouble(),
       sinr:       (map['sinr']       as num).toDouble(),
+
     );
   }
 

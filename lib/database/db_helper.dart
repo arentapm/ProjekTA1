@@ -14,7 +14,7 @@ import '../models/data_qos.dart';
 class DBHelper {
   static Database? _db;
 
-  static const int _dbVersion = 2;
+  static const int _dbVersion = 3;
   static const bool _isDevMode = false;
 
   
@@ -36,9 +36,9 @@ class DBHelper {
       await deleteDatabase(path);
     }
 
-    return openDatabase(
+    return await openDatabase(
       path,
-      version: 1,
+      version: _dbVersion,
 
       onConfigure: (db) async {
         await db.execute('PRAGMA foreign_keys = ON');
@@ -49,7 +49,7 @@ class DBHelper {
         await _createTables(db);
       },
        onUpgrade: (db, oldVersion, newVersion) async {
-        print('🔄 DB UPGRADE: $oldVersion → $newVersion');
+        print('🔄 MIGRATION: $oldVersion → $newVersion');
         await _migrate(db, oldVersion, newVersion);
       },
     );
@@ -72,6 +72,22 @@ class DBHelper {
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_qos_ts ON data_qos(timestamp DESC)',
     );
+
+    await db.execute('''
+      CREATE TABLE forecast_qos (
+        id_forecast INTEGER PRIMARY KEY AUTOINCREMENT,
+        forecast_time DATETIME NOT NULL,
+        predicted_qos REAL NOT NULL,
+        horizon_minutes INTEGER NOT NULL,
+        model_name TEXT,
+        created_at DATETIME NOT NULL
+      )
+    ''');
+
+    await db.execute('''
+      CREATE INDEX idx_forecast_time
+      ON forecast_qos(forecast_time ASC)
+    ''');
 
     // Tabel indeks stabilitas QoS (relasi ke data_qos)
     await db.execute('''
@@ -136,207 +152,295 @@ class DBHelper {
           break;
 
         // =====================================================
-        // TAMBAHKAN VERSI SELANJUTNYA DI SINI
+        // VERSION 3 
         // =====================================================
+         case 3:
+
+          await db.execute('''
+            CREATE TABLE forecast_qos (
+
+              id_forecast INTEGER PRIMARY KEY AUTOINCREMENT,
+
+              forecast_time DATETIME NOT NULL,
+
+              predicted_qos REAL NOT NULL,
+
+              horizon_minutes INTEGER NOT NULL,
+
+              model_name TEXT,
+
+              created_at DATETIME NOT NULL
+            )
+          ''');
+
+          await db.execute('''
+            CREATE INDEX idx_forecast_time
+            ON forecast_qos(forecast_time ASC)
+          ''');
+
+          break;
       }
     }
   }
 
-  // ════════════════════════════════════════════════════════════════
-  // DATA QOS
-  // ════════════════════════════════════════════════════════════════
+  // =========================================================
+  // INSERT QOS
+  // =========================================================
+  static Future<int> insertQoS(
+    Map<String, dynamic> data,
+  ) async {
 
-  /// Simpan satu baris metrik QoS. Kembalikan id_qos baru.
-  static Future<int> insertQoS(Map<String, dynamic> data) async {
     final db = await database;
-    data['timestamp'] ??= DateTime.now().toIso8601String();
-    return db.insert('data_qos', data);
+
+    data['timestamp'] ??=
+        DateTime.now().toIso8601String();
+
+    return await db.insert(
+      'data_qos',
+      data,
+    );
   }
 
-  /// Ambil data [days] hari terakhir, diurutkan ASC (untuk chart).
-  static Future<List<DataQoS>> getHistory({int days = 7}) async {
-    final db     = await database;
+  // =========================================================
+  // GET HISTORY ASC
+  // PENTING untuk forecasting
+  // =========================================================
+  static Future<List<Map<String, dynamic>>>
+      getQoSHistoryAsc({
+    int limit = 1000,
+  }) async {
+
+    final db = await database;
+
+    final rows = await db.query(
+
+      'data_qos',
+
+      orderBy: 'timestamp ASC',
+
+      limit: limit,
+    );
+
+    print(
+      '📊 HISTORY ASC: ${rows.length} rows',
+    );
+
+    return rows;
+  }
+
+  // =========================================================
+  // GET HISTORY DAYS
+  // =========================================================
+  static Future<List<DataQoS>>
+      getHistory({
+    int days = 7,
+  }) async {
+
+    final db = await database;
+
     final cutoff = DateTime.now()
         .subtract(Duration(days: days))
         .toIso8601String();
 
     final rows = await db.query(
+
       'data_qos',
-      where:     'timestamp >= ?',
+
+      where: 'timestamp >= ?',
+
       whereArgs: [cutoff],
-      orderBy:   'timestamp ASC',
+
+      orderBy: 'timestamp ASC',
     );
 
-    print('📊 getHistory($days hari): ${rows.length} baris');
-    return rows.map(DataQoS.fromMap).toList();
+    return rows
+        .map(DataQoS.fromMap)
+        .toList();
   }
 
-  /// Ambil [limit] baris terbaru, diurutkan DESC.
-  static Future<List<DataQoS>> getQoSLastN({int limit = 50}) async {
-    final db   = await database;
-    final rows = await db.query(
-      'data_qos',
-      orderBy: 'timestamp DESC',
-      limit:   limit,
-    );
-    return rows.map(DataQoS.fromMap).toList();
-  }
-
-  /// Alias dari getQoSLastN — dipakai oleh MonitoringController.fetchHistory().
-  static Future<List<Map<String, dynamic>>> getQoSHistory({
-    int limit = 100,
-  }) async {
-    final db   = await database;
-    final rows = await db.query(
-      'data_qos',
-      orderBy: 'timestamp DESC',
-      limit:   limit,
-    );
-    print('📊 getQoSHistory(limit=$limit): ${rows.length} baris');
-    return rows;
-  }
-
-  /// Ambil 1 baris terbaru.
+  // =========================================================
+  // GET LATEST QOS
+  // =========================================================
   static Future<DataQoS?> getLatest() async {
-    final db   = await database;
+
+    final db = await database;
+
     final rows = await db.query(
+
       'data_qos',
+
       orderBy: 'timestamp DESC',
-      limit:   1,
+
+      limit: 1,
     );
+
     if (rows.isEmpty) return null;
-    return DataQoS.fromMap(rows.first);
-  }
 
-  // ════════════════════════════════════════════════════════════════
-  // QOS STABILITY INDEX
-  // ════════════════════════════════════════════════════════════════
-
-  /// Simpan indeks stabilitas untuk id_qos tertentu.
-  static Future<int> insertStabilityIndex({
-    required int idQos,
-    required double qosIndexValue,
-  }) async {
-    final db = await database;
-    return db.insert('qos_stability_index', {
-      'id_qos':          idQos,
-      'qos_index_value': qosIndexValue,
-      'created_at':      DateTime.now().toIso8601String(),
-    });
-  }
-
-  /// Ambil semua indeks stabilitas untuk id_qos tertentu.
-  static Future<List<Map<String, dynamic>>> getStabilityByQoS(int idQos) async {
-    final db = await database;
-    return db.query(
-      'qos_stability_index',
-      where:     'id_qos = ?',
-      whereArgs: [idQos],
-      orderBy:   'created_at DESC',
+    return DataQoS.fromMap(
+      rows.first,
     );
   }
 
-  /// Ambil [limit] indeks stabilitas terbaru.
-  static Future<List<Map<String, dynamic>>> getLatestStability({
-    int limit = 50,
-  }) async {
-    final db = await database;
-    return db.query(
-      'qos_stability_index',
-      orderBy: 'created_at DESC',
-      limit:   limit,
-    );
-  }
+  // =========================================================
+  // INSERT FORECAST
+  // =========================================================
+  static Future<int> insertForecast({
 
-  // ════════════════════════════════════════════════════════════════
-  // MODEL PREDIKSI QOS
-  // ════════════════════════════════════════════════════════════════
+    required DateTime forecastTime,
 
-  /// Simpan model baru.
-  static Future<int> insertModel({
+    required double predictedQos,
+
+    required int horizonMinutes,
+
     required String modelName,
-    int modelStatus = 0,
-  }) async {
-    final db = await database;
-    return db.insert('model_prediksi_qos', {
-      'model_name':   modelName,
-      'model_status': modelStatus,
-      'created_at':   DateTime.now().toIso8601String(),
-    });
-  }
 
-  /// Ambil semua model.
-  static Future<List<Map<String, dynamic>>> getAllModels() async {
-    final db = await database;
-    return db.query('model_prediksi_qos', orderBy: 'created_at DESC');
-  }
-
-  /// Update status model.
-  static Future<int> updateModelStatus({
-    required int idModel,
-    required int status,
   }) async {
+
     final db = await database;
-    return db.update(
-      'model_prediksi_qos',
-      {'model_status': status},
-      where:     'id_model = ?',
-      whereArgs: [idModel],
+
+    return await db.insert(
+      'forecast_qos',
+      {
+
+        'forecast_time':
+            forecastTime.toIso8601String(),
+
+        'predicted_qos':
+            predictedQos,
+
+        'horizon_minutes':
+            horizonMinutes,
+
+        'model_name':
+            modelName,
+
+        'created_at':
+            DateTime.now()
+                .toIso8601String(),
+      },
     );
   }
 
-  // ════════════════════════════════════════════════════════════════
-  // STATUS SISTEM
-  // ════════════════════════════════════════════════════════════════
-
-  /// Upsert status sistem (insert jika belum ada, update jika sudah ada).
-  static Future<void> upsertStatusSistem({
-    required String applicationStatus,
-    required int monitoringStatus,
-    required String modelStatus,
+  // =========================================================
+  // GET FORECAST HISTORY
+  // =========================================================
+  static Future<List<Map<String, dynamic>>>
+      getForecastHistory({
+    int limit = 200,
   }) async {
-    final db   = await database;
-    final rows = await db.query('status_sistem', limit: 1);
+
+    final db = await database;
+
+    return await db.query(
+
+      'forecast_qos',
+
+      orderBy: 'forecast_time ASC',
+
+      limit: limit,
+    );
+  }
+
+  // =========================================================
+  // DELETE OLD FORECAST
+  // =========================================================
+  static Future<void> clearOldForecast({
+    int keepLast = 500,
+  }) async {
+
+    final db = await database;
+
+    await db.execute('''
+      DELETE FROM forecast_qos
+      WHERE id_forecast NOT IN (
+
+        SELECT id_forecast
+        FROM forecast_qos
+        ORDER BY forecast_time DESC
+        LIMIT $keepLast
+      )
+    ''');
+  }
+
+  // =========================================================
+  // STATUS SISTEM
+  // =========================================================
+  static Future<void> upsertStatusSistem({
+
+    required String applicationStatus,
+
+    required int monitoringStatus,
+
+    required String modelStatus,
+
+  }) async {
+
+    final db = await database;
+
+    final rows = await db.query(
+      'status_sistem',
+      limit: 1,
+    );
 
     final data = {
-      'application_status': applicationStatus,
-      'monitoring_status':  monitoringStatus,
-      'model_status':       modelStatus,
-      'updated_at':         DateTime.now().toIso8601String(),
+
+      'application_status':
+          applicationStatus,
+
+      'monitoring_status':
+          monitoringStatus,
+
+      'model_status':
+          modelStatus,
+
+      'updated_at':
+          DateTime.now()
+              .toIso8601String(),
     };
 
     if (rows.isEmpty) {
-      await db.insert('status_sistem', data);
-    } else {
-      await db.update(
+
+      await db.insert(
         'status_sistem',
         data,
-        where:     'id_status_sistem = ?',
-        whereArgs: [rows.first['id_status_sistem']],
+      );
+
+    } else {
+
+      await db.update(
+
+        'status_sistem',
+
+        data,
+
+        where:
+            'id_status_sistem = ?',
+
+        whereArgs: [
+          rows.first['id_status_sistem']
+        ],
       );
     }
   }
 
-  /// Ambil status sistem terkini.
-  static Future<Map<String, dynamic>?> getStatusSistem() async {
-    final db   = await database;
-    final rows = await db.query(
-      'status_sistem',
-      orderBy: 'updated_at DESC',
-      limit:   1,
-    );
-    return rows.isEmpty ? null : rows.first;
-  }
-
-  // ════════════════════════════════════════════════════════════════
-  // DEBUG & UTILITY
-  // ════════════════════════════════════════════════════════════════
-
+  // =========================================================
+  // DEBUG
+  // =========================================================
   static Future<void> debugPrintAllQoS() async {
-    final db   = await database;
-    final rows = await db.query('data_qos', orderBy: 'id_qos DESC');
-    print('========== DATA QoS (${rows.length} baris) ==========');
+
+    final db = await database;
+
+    final rows = await db.query(
+      'data_qos',
+      orderBy: 'timestamp DESC',
+    );
+
+    print(
+      '========== DATA QOS =========='
+    );
+
     for (final r in rows) {
+
       print(r);
     }
   }
