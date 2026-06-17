@@ -11,10 +11,17 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 // NetworkService — Pengukuran QoS WiFi (4 Parameter: Throughput,
 //                 Delay, Jitter, SINR)
 //
+// FIX UTAMA (permission):
+//   requestPermission() = menampilkan dialog → HANYA dari UI/foreground
+//   hasPermission()     = cek status saja    → AMAN dari background isolate
+//
+// Semua fungsi internal yang dipanggil dari background isolate
+// (getWifiSnapshot, getScanNeighborAPs, getSSID, getBSSID, getIPAddress)
+// TIDAK boleh memanggil requestPermission() — diganti hasPermission() check.
 //
 // Definisi parameter final:
 //   throughput = bytes_diterima × 8 / (waktu_detik × 1.000.000) [Mbps]
-//   delay      = rata-rata |RTT[i] - RTT[i-1]| [ms]
+//   delay      = rata-rata RTT [ms]
 //   jitter     = Σ|RTT[i] - RTT[i-1]| / N [ms]
 //   sinr       = 10 × log10( P_sinyal / (P_interferensi + P_noise) ) [dB]
 // ════════════════════════════════════════════════════════════════════
@@ -33,29 +40,39 @@ class NetworkService {
     'http://1.1.1.1',
   ];
 
-  // ── URL file untuk throughput probe (~100 KB) ─────────────────
-  static const List<String> _throughputUrls = [
-    'https://speed.cloudflare.com/__down?bytes=102400',
-    'https://httpbin.org/bytes/102400',
-  ];
-
   // Jumlah probe per pengukuran delay/jitter
   static const int _probeCount = 4;
 
   // Timeout satu probe (ms)
   static const int _probeTimeoutMs = 1500;
 
-  // Timeout download throughput (ms)
-  // static const int _throughputTimeoutMs = 15000;
-
   // ════════════════════════════════════════════════════════════════
   // PERMISSION
+  //
+  // ATURAN KETAT:
+  //   requestPermission() → HANYA dipanggil dari UI (DashboardPage)
+  //                         sebelum service background distart.
+  //                         Memanggil ini dari background isolate
+  //                         menyebabkan PlatformException karena
+  //                         tidak ada Android Activity.
+  //
+  //   hasPermission()     → AMAN dipanggil dari mana saja termasuk
+  //                         background isolate. Hanya membaca status,
+  //                         tidak membuka dialog.
   // ════════════════════════════════════════════════════════════════
 
+  /// Tampilkan dialog permission — HANYA dari UI/foreground.
+  /// Jangan panggil dari background isolate / TaskHandler.
   static Future<void> requestPermission() async {
     if (!await Permission.location.isGranted) {
       await Permission.location.request();
     }
+  }
+
+  /// Cek status permission tanpa membuka dialog.
+  /// Aman dipanggil dari background isolate.
+  static Future<bool> hasPermission() async {
+    return await Permission.location.isGranted;
   }
 
   // ════════════════════════════════════════════════════════════════
@@ -70,193 +87,152 @@ class NetworkService {
     return results == ConnectivityResult.wifi;
   }
 
-// ════════════════════════════════════════════════════════════════
-// THROUGHPUT — TrafficStats (Android Native via MethodChannel)
-//
-// throughput = (Δbytes × 8) / (Δtime × 1_000_000)  [Mbps]
-//
-// Catatan:
-// - Menggunakan total RX bytes (downlink)
-// - Perlu 2 sampel untuk menghasilkan nilai pertama
-// ════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════════════════════════════
+  // THROUGHPUT — TrafficStats (Android Native via MethodChannel)
+  //
+  // throughput = (Δbytes × 8) / (Δtime × 1_000_000)  [Mbps]
+  //
+  // Catatan:
+  // - Menggunakan total RX bytes (downlink)
+  // - Perlu 2 sampel untuk menghasilkan nilai pertama
+  // ════════════════════════════════════════════════════════════════
 
-static int? _lastRxBytes;
-static DateTime? _lastTimestamp;
+  static int? _lastRxBytes;
+  static DateTime? _lastTimestamp;
 
-// ════════════════════════════════════════════════════════════════
-// TRAFFIC STATS (Android)
-// ════════════════════════════════════════════════════════════════
-
-static Future<int> getRxBytes() async {
-  try {
-    final result = await MethodChannelHelper.trafficStats
-        .invokeMethod('getRxBytes');
-    final bytes = (result as int?) ?? 0;
-    print('[NetworkService] getRxBytes OK: $bytes bytes');
-    return bytes;
-  } catch (e) {
-    // Hanya print error, jangan return 0 — return -1 agar bisa dibedakan
-    print('[NetworkService] getRxBytes error: $e');
-    return -1; // ← return -1, bukan 0, agar updateTraffic bisa deteksi error
+  static Future<int> getRxBytes() async {
+    try {
+      final result = await MethodChannelHelper.trafficStats
+          .invokeMethod('getRxBytes');
+      final bytes = (result as int?) ?? 0;
+      print('[NetworkService] getRxBytes OK: $bytes bytes');
+      return bytes;
+    } catch (e) {
+      print('[NetworkService] getRxBytes error: $e');
+      return -1;
+    }
   }
-}
 
-static Future<int> getTxBytes() async {
-  try {
-    final result = await MethodChannelHelper.trafficStats
-        .invokeMethod('getTxBytes');
-    return (result as int?) ?? 0;
-  } catch (e) {
-    print('[NetworkService] getTxBytes error: $e');
-    return 0;
+  static Future<int> getTxBytes() async {
+    try {
+      final result = await MethodChannelHelper.trafficStats
+          .invokeMethod('getTxBytes');
+      return (result as int?) ?? 0;
+    } catch (e) {
+      print('[NetworkService] getTxBytes error: $e');
+      return 0;
+    }
   }
-}
 
-/// Ambil total RX bytes dari Android (TrafficStats)
-static Future<int> _getTotalRxBytes() async {
-  try {
-    final result = await MethodChannelHelper.trafficStats
-        .invokeMethod('getRxBytes');
-    return (result as int?) ?? 0;
-  } catch (e) {
-    print('[NetworkService] getRxBytes error: $e');
-    return 0;
+  static Future<int> _getTotalRxBytes() async {
+    try {
+      final result = await MethodChannelHelper.trafficStats
+          .invokeMethod('getRxBytes');
+      return (result as int?) ?? 0;
+    } catch (e) {
+      print('[NetworkService] getRxBytes error: $e');
+      return 0;
+    }
   }
-}
 
-/// Hitung throughput dalam Mbps
-/// Return null jika data belum siap (sampling pertama)
-static Future<double?> getThroughputMbps() async {
-  final now = DateTime.now();
-  final currentRx = await _getTotalRxBytes();
+  /// Hitung throughput dalam Mbps.
+  /// Return null jika data belum siap (sampling pertama).
+  static Future<double?> getThroughputMbps() async {
+    final now = DateTime.now();
+    final currentRx = await _getTotalRxBytes();
 
-  // ── Sampling pertama (belum bisa hitung) ──
-  if (_lastRxBytes == null || _lastTimestamp == null) {
+    if (_lastRxBytes == null || _lastTimestamp == null) {
+      _lastRxBytes = currentRx;
+      _lastTimestamp = now;
+      print('[NetworkService] throughput init...');
+      return null;
+    }
+
+    final deltaBytes = currentRx - _lastRxBytes!;
+    final deltaTimeSec =
+        now.difference(_lastTimestamp!).inMilliseconds / 1000;
+
+    if (deltaTimeSec <= 0 || deltaBytes < 0) {
+      _lastRxBytes = currentRx;
+      _lastTimestamp = now;
+      return null;
+    }
+
+    final throughputMbps =
+        (deltaBytes * 8) / (deltaTimeSec * 1000000);
+
     _lastRxBytes = currentRx;
     _lastTimestamp = now;
-    print('[NetworkService] throughput init...');
-    return null;
+
+    print('[NetworkService] throughput=${throughputMbps.toStringAsFixed(2)} Mbps');
+
+    return throughputMbps;
   }
-
-  final deltaBytes = currentRx - _lastRxBytes!;
-  final deltaTimeSec =
-      now.difference(_lastTimestamp!).inMilliseconds / 1000;
-
-  // Validasi
-  if (deltaTimeSec <= 0 || deltaBytes < 0) {
-    _lastRxBytes = currentRx;
-    _lastTimestamp = now;
-    return null;
-  }
-
-  final throughputMbps =
-      (deltaBytes * 8) / (deltaTimeSec * 1000000);
-
-  // Update state
-  _lastRxBytes = currentRx;
-  _lastTimestamp = now;
-
-  print('[NetworkService] throughput=${throughputMbps.toStringAsFixed(2)} Mbps');
-
-  return throughputMbps;
-}
-
 
   // ════════════════════════════════════════════════════════════════
-  // [2] DELAY & JITTER — Active HTTP HEAD Probe
+  // DELAY & JITTER — Active HTTP HEAD Probe
   //
-  // Definisi final (tidak ada latency/packetLoss):
-  //
-  // Delay  = rata-rata RTT
-  //        = Σ RTT[i] / N
-  //            Mengukur perubahan delay antar paket yang berurutan.
-  //            Jika RTT stabil → delay rendah.
-  //
-  // Jitter = variasi delay antar paket
-  //        = Σ |RTT[i] - RTT[i-1]| / N
-  //            Normalisasi per paket (bukan per selisih).
-  //            Mengukur rata-rata variasi delay per paket dikirim.
-  //
-  // Catatan perbedaan delay vs jitter:
-  //   - Delay pakai pembagi (N-1): rata-rata atas jumlah selisih
-  //   - Jitter pakai pembagi N   : rata-rata atas jumlah paket
-  //   - Keduanya dihitung dari jitterSum yang sama
+  // Delay  = rata-rata RTT = Σ RTT[i] / N
+  // Jitter = variasi delay = Σ |RTT[i] - RTT[i-1]| / N
   //
   // Referensi:
   //   RFC 3393 — IP Packet Delay Variation (IPDV)
   //   ITU-T Y.1541 — Network Performance Objectives for IP
   // ════════════════════════════════════════════════════════════════
 
-  /// Ukur delay dan jitter via HTTP HEAD probing.
-  /// Kembalikan [ProbeResult] dengan delay dan jitter dalam ms.
-// ======================= PERBAIKAN DELAY & JITTER =======================
-//
-// DEFINISI FINAL:
-//
-// Delay  = rata-rata RTT
-//        = Σ RTT[i] / N
-//
-// Jitter = variasi delay antar paket
-//        = Σ |RTT[i] - RTT[i-1]| / N
-//
-// =======================================================================
+  static Future<ProbeResult> probeDelayJitter() async {
+    final rtts = <double>[];
 
-static Future<ProbeResult> probeDelayJitter() async {
-  final rtts = <double>[];
-
-  String? workingHost;
-  for (final host in _probeHosts) {
-    if (await _isHostReachable(host)) {
-      workingHost = host;
-      break;
-    }
-  }
-
-  if (workingHost == null) {
-    return ProbeResult.empty();
-  }
-
-  for (int i = 0; i < _probeCount; i++) {
-    final rtt = await _singleProbe(workingHost);
-    if (rtt != null) {
-      rtts.add(rtt);
+    String? workingHost;
+    for (final host in _probeHosts) {
+      if (await _isHostReachable(host)) {
+        workingHost = host;
+        break;
+      }
     }
 
-    if (i < _probeCount - 1) {
-      await Future.delayed(const Duration(milliseconds: 100));
+    if (workingHost == null) {
+      return ProbeResult.empty();
     }
+
+    for (int i = 0; i < _probeCount; i++) {
+      final rtt = await _singleProbe(workingHost);
+      if (rtt != null) {
+        rtts.add(rtt);
+      }
+      if (i < _probeCount - 1) {
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+    }
+
+    if (rtts.length < 2) {
+      return ProbeResult.empty();
+    }
+
+    // Delay = rata-rata RTT
+    double sumRtt = 0.0;
+    for (final rtt in rtts) {
+      sumRtt += rtt;
+    }
+    final delayMs = sumRtt / rtts.length;
+
+    // Jitter = rata-rata variasi antar paket
+    double diffSum = 0.0;
+    for (int i = 1; i < rtts.length; i++) {
+      diffSum += (rtts[i] - rtts[i - 1]).abs();
+    }
+    final jitterMs = diffSum / rtts.length;
+
+    print('[QoS] delay=${delayMs.toStringAsFixed(1)} ms | '
+        'jitter=${jitterMs.toStringAsFixed(1)} ms | '
+        'samples=${rtts.length}');
+
+    return ProbeResult(
+      delayMs: delayMs,
+      jitterMs: jitterMs,
+      rttSamples: rtts,
+    );
   }
-
-  if (rtts.length < 2) {
-    return ProbeResult.empty();
-  }
-
-  // ======================= DELAY =======================
-  // Delay = rata-rata RTT
-  double sumRtt = 0.0;
-  for (final rtt in rtts) {
-    sumRtt += rtt;
-  }
-  final delayMs = sumRtt / rtts.length;
-
-  // ======================= JITTER ======================
-  double diffSum = 0.0;
-  for (int i = 1; i < rtts.length; i++) {
-    diffSum += (rtts[i] - rtts[i - 1]).abs();
-  }
-
-  final jitterMs = diffSum / rtts.length;
-
-  print('[QoS] delay=${delayMs.toStringAsFixed(1)} ms | '
-      'jitter=${jitterMs.toStringAsFixed(1)} ms | '
-      'samples=${rtts.length}');
-
-  return ProbeResult(
-    delayMs: delayMs,
-    jitterMs: jitterMs,
-    rttSamples: rtts,
-  );
-}
 
   static Future<double?> _singleProbe(String host) async {
     try {
@@ -296,42 +272,29 @@ static Future<ProbeResult> probeDelayJitter() async {
   }
 
   // ════════════════════════════════════════════════════════════════
-  // [3] SINR — Estimasi Dinamis
+  // SINR — Estimasi Dinamis
   //
-  // Rumus SINR
-  //   SINR (dB) = 10 × log10( P_signal / (P_interference + P_noise) )
+  // SINR (dB) = 10 × log10( P_signal / (P_interference + P_noise) )
   //   dengan semua P dalam satuan linear mW:
   //     P_mW = 10^(dBm / 10)
-  //
-  // Interferensi:
-  //   - AP co-band  → dihitung dari RSSI semua AP di band yang sama
-  //                   (2.4 GHz atau 5 GHz), dijumlahkan dalam linear mW
-  //   - Jika tidak ada AP tetangga → pakai nilai statis per band
   //
   // Referensi:
   //   Goldsmith, "Wireless Communications", Cambridge UP, 2005.
   //   IEEE 802.11-2020 Standard, Annex E.
   // ════════════════════════════════════════════════════════════════
 
-  /// Estimasi SINR (dB) dari RSSI dan scan AP tetangga.
-  /// Menggunakan konversi linear yang benar, bukan pengurangan dBm.
   static double estimateSINR({
     required double           rssiDbm,
     required bool             is5GHz,
     required List<NeighborAP> neighborAPs,
   }) {
-    // Validasi RSSI
     if (rssiDbm <= -110 || rssiDbm >= 0) {
-      return is5GHz ? 5.0 : 3.0; // fallback minimal
+      return is5GHz ? 5.0 : 3.0;
     }
 
-    // Noise floor (karakteristik fisik, tidak berubah)
-    // 2.4 GHz: -92 dBm | 5 GHz: -95 dBm
-    // Referensi: IEEE 802.11-2020 Annex E
+    // Noise floor (karakteristik fisik, IEEE 802.11-2020 Annex E)
     final double noiseFloorDbm = is5GHz ? -95.0 : -92.0;
 
-    // ── Hitung daya interferensi dari AP tetangga ─────────────────
-    // Filter AP di band yang sama → sumber interferensi nyata
     final sameBandAPs = neighborAPs.where((ap) {
       if (ap.rssiDbm <= -110 || ap.rssiDbm >= 0) return false;
       if (is5GHz) return ap.frequencyMhz >= 4900;
@@ -341,38 +304,25 @@ static Future<ProbeResult> probeDelayJitter() async {
     final double interferenceDbm;
 
     if (sameBandAPs.isEmpty) {
-      // Tidak ada data scan → fallback nilai statis
       interferenceDbm = is5GHz ? -90.0 : -85.0;
       print('[NetworkService] SINR: tidak ada AP tetangga, '
           'pakai interferensi statis = $interferenceDbm dBm');
     } else {
-      // Jumlahkan daya semua AP interferensi dalam skala linear (mW)
-      // P_total = Σ 10^(RSSI_i / 10)
       double totalMw = 0.0;
       for (final ap in sameBandAPs) {
         totalMw += _dbmToMw(ap.rssiDbm);
       }
-      // Konversi kembali ke dBm
       interferenceDbm = _mwToDbm(totalMw);
       print('[NetworkService] SINR: ${sameBandAPs.length} AP tetangga, '
           'interferensi total = ${interferenceDbm.toStringAsFixed(1)} dBm');
     }
 
-    // ── Hitung SINR dengan rumus yang benar (domain linear) ───────
-    //
-    // =konversi semua nilai ke mW dulu, baru hitung rasio, kemudian konversi hasil ke dB.
-    //
-    //   SINR = P_signal / (P_interference + P_noise)   [linear]
-    //   SINR_dB = 10 × log10(SINR)
-    //
     final double pSignal       = _dbmToMw(rssiDbm);
     final double pInterference = _dbmToMw(interferenceDbm);
     final double pNoise        = _dbmToMw(noiseFloorDbm);
     final double denominator   = pInterference + pNoise;
 
-    if (denominator <= 0.0 || pSignal <= 0.0) {
-      return 0.0;
-    }
+    if (denominator <= 0.0 || pSignal <= 0.0) return 0.0;
 
     final double sinrLinear = pSignal / denominator;
     final double sinrDb     = 10.0 * log(sinrLinear) / ln10;
@@ -386,7 +336,6 @@ static Future<ProbeResult> probeDelayJitter() async {
     return sinrDb;
   }
 
-  // ── Konversi dBm ↔ mW ────────────────────────────────────────
   static double _dbmToMw(double dbm) => pow(10.0, dbm / 10.0).toDouble();
   static double _mwToDbm(double mw) {
     if (mw <= 0) return -120.0;
@@ -424,66 +373,79 @@ static Future<ProbeResult> probeDelayJitter() async {
 
   // ════════════════════════════════════════════════════════════════
   // WIFI SCAN — AP Tetangga
+  //
+  // FIX: requestPermission() DIHAPUS dari sini.
+  // Fungsi ini bisa dipanggil dari background isolate via
+  // getWifiSnapshot(). Memanggil requestPermission() di background
+  // menyebabkan PlatformException (no Activity).
+  //
+  // Pengganti: cek hasPermission() → jika false, kembalikan cache.
+  // requestPermission() hanya boleh dipanggil dari UI.
   // ════════════════════════════════════════════════════════════════
 
- static Future<List<NeighborAP>> getScanNeighborAPs({
-  String? currentBssid,
-}) async {
-  // ✅ FIX BUG 3: Pakai cache jika belum expired
-  // Android 9+ membatasi scan WiFi — maksimal 4 scan per 2 menit
-  final now = DateTime.now();
-  if (_lastScanTime != null &&
-      now.difference(_lastScanTime!) < _scanTtl &&
-      _cachedNeighborAPs.isNotEmpty) {
-    print('[NetworkService] pakai cache SINR (${_cachedNeighborAPs.length} AP)');
-    return _cachedNeighborAPs;
-  }
-
-  try {
-    await requestPermission();
-    if (!await Permission.location.isGranted) {
-      print('[NetworkService] izin lokasi ditolak');
-      return _cachedNeighborAPs; // kembalikan cache lama jika ada
-    }
-
-    final List<WifiNetwork>? networks = await WiFiForIoTPlugin.loadWifiList();
-    if (networks == null || networks.isEmpty) {
+  static Future<List<NeighborAP>> getScanNeighborAPs({
+    String? currentBssid,
+  }) async {
+    // Pakai cache jika belum expired
+    // Android 9+ membatasi scan WiFi — maksimal 4 scan per 2 menit
+    final now = DateTime.now();
+    if (_lastScanTime != null &&
+        now.difference(_lastScanTime!) < _scanTtl &&
+        _cachedNeighborAPs.isNotEmpty) {
+      print('[NetworkService] pakai cache SINR (${_cachedNeighborAPs.length} AP)');
       return _cachedNeighborAPs;
     }
 
-    final neighbors = <NeighborAP>[];
-    for (final net in networks) {
-      if (currentBssid != null &&
-          net.bssid?.toLowerCase() == currentBssid.toLowerCase()) {
-        continue;
+    try {
+      // ✅ FIX: hasPermission() bukan requestPermission()
+      // Aman dipanggil dari background isolate
+      if (!await hasPermission()) {
+        print('[NetworkService] izin lokasi tidak ada, skip scan');
+        return _cachedNeighborAPs;
       }
-      final freq = net.frequency;
-      final rssi = net.level;
-      if (freq == null || rssi == null) continue;
-      if (rssi == 0 || rssi < -110) continue;
 
-      neighbors.add(NeighborAP(
-        bssid:        net.bssid ?? 'unknown',
-        frequencyMhz: freq,
-        rssiDbm:      rssi.toDouble(),
-      ));
+      final List<WifiNetwork>? networks = await WiFiForIoTPlugin.loadWifiList();
+      if (networks == null || networks.isEmpty) {
+        return _cachedNeighborAPs;
+      }
+
+      final neighbors = <NeighborAP>[];
+      for (final net in networks) {
+        if (currentBssid != null &&
+            net.bssid?.toLowerCase() == currentBssid.toLowerCase()) {
+          continue;
+        }
+        final freq = net.frequency;
+        final rssi = net.level;
+        if (freq == null || rssi == null) continue;
+        if (rssi == 0 || rssi < -110) continue;
+
+        neighbors.add(NeighborAP(
+          bssid:        net.bssid ?? 'unknown',
+          frequencyMhz: freq,
+          rssiDbm:      rssi.toDouble(),
+        ));
+      }
+
+      _cachedNeighborAPs = neighbors;
+      _lastScanTime      = now;
+
+      print('[NetworkService] scan baru: ${neighbors.length} AP tetangga');
+      return neighbors;
+
+    } catch (e) {
+      print('[NetworkService] getScanNeighborAPs error: $e');
+      return _cachedNeighborAPs;
     }
-
-    // Update cache
-    _cachedNeighborAPs = neighbors;
-    _lastScanTime      = now;
-
-    print('[NetworkService] scan baru: ${neighbors.length} AP tetangga');
-    return neighbors;
-
-  } catch (e) {
-    print('[NetworkService] getScanNeighborAPs error: $e');
-    return _cachedNeighborAPs; // fallback ke cache
   }
-}
 
   // ════════════════════════════════════════════════════════════════
   // WIFI SNAPSHOT
+  //
+  // FIX: Fungsi ini dipanggil dari background isolate (_runPoll).
+  // Semua fungsi yang dipanggil di sini tidak boleh memanggil
+  // requestPermission() — sudah diperbaiki di getSSID, getBSSID,
+  // getIPAddress, dan getScanNeighborAPs di bawah.
   // ════════════════════════════════════════════════════════════════
 
   static Future<WiFiSnapshot> getWifiSnapshot() async {
@@ -524,27 +486,36 @@ static Future<ProbeResult> probeDelayJitter() async {
 
   // ════════════════════════════════════════════════════════════════
   // INFO JARINGAN
+  //
+  // FIX: requestPermission() DIHAPUS dari getSSID, getBSSID,
+  // getIPAddress — fungsi-fungsi ini bisa dipanggil dari background
+  // isolate via getWifiSnapshot(). Ganti dengan hasPermission() check.
+  //
+  // requestPermission() tetap ada sebagai fungsi publik untuk
+  // dipanggil dari UI (DashboardPage._startMonitoring).
   // ════════════════════════════════════════════════════════════════
 
   static Future<String> getSSID() async {
-    await requestPermission();
+    // ✅ FIX: cek saja, tidak request
+    if (!await hasPermission()) return 'Unknown';
     final ssid = await _info.getWifiName();
     return ssid?.replaceAll('"', '') ?? 'Unknown';
   }
 
   static Future<String> getBSSID() async {
-    await requestPermission();
+    // ✅ FIX: cek saja, tidak request
+    if (!await hasPermission()) return 'Unknown';
     final bssid = await _info.getWifiBSSID();
     return bssid ?? 'Unknown';
   }
 
   static Future<String> getIPAddress() async {
-    await requestPermission();
+    // ✅ FIX: cek saja, tidak request
+    if (!await hasPermission()) return '0.0.0.0';
     final ip = await _info.getWifiIP();
     return ip ?? '0.0.0.0';
   }
 }
-
 
 // ════════════════════════════════════════════════════════════════════
 // WiFiSnapshot
@@ -580,15 +551,8 @@ class WiFiSnapshot {
       'neighbors=${neighborAPs.length})';
 }
 
-
 // ════════════════════════════════════════════════════════════════════
 // ProbeResult — Hasil pengukuran delay & jitter
-//
-// Packet loss DIHAPUS sesuai spesifikasi: hanya 4 parameter QoS.
-// Field:
-//   delayMs    — rata-rata |RTT[i]-RTT[i-1]| / (N-1) [ms]
-//   jitterMs   — Σ|RTT[i]-RTT[i-1]| / N [ms]
-//   rttSamples — semua nilai RTT mentah [ms]
 // ════════════════════════════════════════════════════════════════════
 
 class ProbeResult {
@@ -608,7 +572,6 @@ class ProbeResult {
         rttSamples: [],
       );
 
-  /// True jika ada sampel RTT yang berhasil diukur
   bool get isValid => rttSamples.isNotEmpty;
 
   @override
@@ -618,7 +581,6 @@ class ProbeResult {
       'jitter=${jitterMs.toStringAsFixed(1)} ms | '
       'samples=${rttSamples.length})';
 }
-
 
 // ════════════════════════════════════════════════════════════════════
 // NeighborAP
@@ -640,9 +602,8 @@ class NeighborAP {
       'NeighborAP(bssid=$bssid | freq=$frequencyMhz MHz | rssi=$rssiDbm dBm)';
 }
 
-
 // ════════════════════════════════════════════════════════════════════
-// MethodChannelHelper — dipertahankan untuk kompatibilitas
+// MethodChannelHelper
 // ════════════════════════════════════════════════════════════════════
 
 class MethodChannelHelper {

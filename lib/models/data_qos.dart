@@ -9,8 +9,6 @@
 //   jitter     FLOAT
 //   sinr       FLOAT
 //
-// Field ssid, ip, band, quality, confidence, anomaly_score, qos_index,
-// source, packet_loss DIHAPUS karena tidak ada di ERD.
 // ════════════════════════════════════════════════════════════════════
 class DataQoS {
   final int?     idQos;

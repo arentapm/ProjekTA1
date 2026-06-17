@@ -7,13 +7,14 @@ import 'dart:io';
 import '../models/data_qos.dart';
 import '../services/export_excel.dart';
 import '../database/db_helper.dart';
+import '../database/session_prefs.dart';
 
 const _primary    = Color(0xFF185FA5);
 const _colorGreen = Color(0xFF3B6D11);
 const _colorRed   = Color(0xFFA32D2D);
 const _bgPage     = Color(0xFFF2F4F8);
 const _textSec    = Color(0xFF6B7280);
-const String baseUrl = "http://192.168.137.1:8000";
+const String baseUrl = "https://netpredict.cloud";
 
 class SystemStatusPage extends StatefulWidget {
   /// exportBuffer dari MonitoringController — tidak dibatasi, akumulasi seluruh sesi.
@@ -68,13 +69,13 @@ class _SystemStatusPageState extends State<SystemStatusPage> {
   @override
   void initState() {
     super.initState();
+    _loadPersistedData(); 
     _checkBackendConnection();
     _loadAppInfo();
     _loadDeviceInfo();
     _startUptimeTimer();
     _startAutoRefreshTimer();
     _loadTotalDbRows();
-    _startAutoRefreshTimer(); 
     _initDbBaseline();
 
     if (widget.exportBuffer.isNotEmpty) {
@@ -83,8 +84,47 @@ class _SystemStatusPageState extends State<SystemStatusPage> {
     }
   }
 
+  Future<void> _loadPersistedData() async {
+  // 1. Last export dari SharedPreferences
+  final lastExport = await SessionPrefs.loadLastExport();
+
+  // 2. Last sync dari DB langsung — lebih akurat
+  final lastSync = await _getLastSyncFromDb();
+
+  // 3. Total sessions — increment setiap app dibuka
+  final sessions = await SessionPrefs.incrementAndGetSession();
+
+  if (mounted) {
+    setState(() {
+      if (lastExport != null) {
+        _lastExportTime  = lastExport;
+        _lastExportLabel = _timeAgoLabel(lastExport);
+      }
+      if (lastSync != null) {
+        _lastFetchTime  = lastSync;
+        _lastFetchLabel = _timeAgoLabel(lastSync);
+      }
+      _totalSessions = sessions;
+    });
+  }
+}
+
+Future<DateTime?> _getLastSyncFromDb() async {
+  try {
+    final db     = await DBHelper.database;
+    final result = await db.rawQuery(
+      'SELECT MAX(timestamp) as last_ts FROM data_qos',
+    );
+    final raw = result.first['last_ts'] as String?;
+    if (raw == null) return null;
+    return DateTime.tryParse(raw);
+  } catch (_) {
+    return null;
+  }
+}
+
   Future<void> _loadTotalDbRows() async {
-    final count = await getTotalQoSCount();
+    final count = await _getDbCount();
     if (mounted) setState(() => _totalDbRows = count);
   }
 
@@ -667,9 +707,12 @@ Future<void> _checkBackendConnection({bool silent = false}) async {
                 if (mounted) Navigator.of(context, rootNavigator: true).pop();
 
                 if (path != null) {
+                  final now = DateTime.now();
+                  await SessionPrefs.saveLastExport(now);
+
                   setState(() {
-                    _lastExportTime  = DateTime.now();
-                    _lastExportLabel = _timeAgoLabel(_lastExportTime!);
+                    _lastExportTime  = now;
+                    _lastExportLabel = _timeAgoLabel(now);
                   });
                   if (mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(

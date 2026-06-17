@@ -121,8 +121,9 @@ class _MonitoringPageState extends State<MonitoringPage> {
     return "Buruk";
   }
 
+  // Ini sudah benar — jangan diubah
   String kategoriJitter(double v) {
-    if (v < 75)  return "Sangat Baik";
+    if (v < 75)  return "Sangat Baik";  // TIPHON: < 75ms
     if (v < 125) return "Baik";
     if (v < 225) return "Sedang";
     return "Buruk";
@@ -386,61 +387,152 @@ class _MonitoringPageState extends State<MonitoringPage> {
 
   // ── IMPACT ────────────────────────────────────────────────────────────
   List<Map<String, String>> _impactThroughput(double mbps) => [
-    {"text": "Streaming 4K: ${mbps > 25 ? "Lancar" : mbps > 5 ? "Perlu buffer" : "Tidak memadai"}", "status": mbps > 25 ? "good" : mbps > 5 ? "warn" : "bad"},
-    {"text": "Video call HD: ${mbps > 1.5 ? "Lancar" : "Tidak stabil"}", "status": mbps > 1.5 ? "good" : "bad"},
-    {"text": "Gaming online: ${mbps > 3 ? "Stabil" : "Mungkin lag"}", "status": mbps > 3 ? "good" : "warn"},
-    {"text": "Download file: ${mbps > 5 ? "Cepat" : mbps > 1 ? "Sedang" : "Lambat"}", "status": mbps > 5 ? "good" : "warn"},
-  ];
+  {
+    "text": "Kualitas jaringan WiFi (TIPHON): "
+        "${mbps > 10 ? "Sangat Baik — memenuhi threshold >10 Mbps"
+           : mbps > 5 ? "Baik — 5–10 Mbps, cukup untuk aktivitas umum"
+           : mbps > 1 ? "Sedang — 1–5 Mbps, aktivitas terbatas"
+           : "Buruk — <1 Mbps, tidak memadai untuk layanan apapun"}",
+    "status": mbps > 10 ? "good" : mbps > 5 ? "good" : mbps > 1 ? "warn" : "bad",
+  },
+  {
+    "text": "Video conference (Zoom/Meet): "
+        "${mbps >= 2 ? "Memadai — throughput ≥2 Mbps mendukung video conference"
+           : mbps >= 1 ? "Minimal — rentan gangguan pada jam sibuk"
+           : "Tidak memadai — video conference tidak stabil"}",
+    "status": mbps >= 2 ? "good" : mbps >= 1 ? "warn" : "bad",
+  },
+  {
+    "text": "Streaming video online: "
+        "${mbps > 5 ? "Lancar — throughput memadai untuk HD streaming"
+           : mbps > 1 ? "Perlu buffer — throughput di bawah ideal untuk HD"
+           : "Tidak layak — terjadi buffering terus-menerus"}",
+    "status": mbps > 5 ? "good" : mbps > 1 ? "warn" : "bad",
+  },
+  {
+    "text": "Gaming online & cloud gaming: "
+        "${mbps > 3 ? "Stabil — throughput cukup, QoE gaming terjaga"
+           : mbps > 1 ? "Rentan lag — throughput mendekati batas minimum"
+           : "Kritis — degradasi QoE gaming signifikan"}",
+    "status": mbps > 3 ? "good" : mbps > 1 ? "warn" : "bad",
+  },
+];
 
   List<Map<String, String>> _impactDelay(double ms) => [
-    {"text": "Game online: ${ms < 150 ? "Playable" : ms < 300 ? "Terasa lag" : "Tidak bisa dimainkan"}", "status": ms < 150 ? "good" : ms < 300 ? "warn" : "bad"},
-    {"text": "Video call: ${ms < 150 ? "Tidak ada lag" : "Delay terasa"}", "status": ms < 150 ? "good" : "warn"},
-  ];
+  {
+    "text": "Kategori TIPHON: "
+        "${ms < 150 ? "Sangat Baik (<150 ms) — jaringan responsif"
+           : ms < 300 ? "Baik (150–300 ms) — masih dalam toleransi normal"
+           : ms < 450 ? "Sedang (300–450 ms) — terasa lambat pada aplikasi real-time"
+           : "Buruk (>450 ms) — tidak layak untuk layanan interaktif "}",
+    "status": ms < 150 ? "good" : ms < 300 ? "good" : ms < 450 ? "warn" : "bad",
+  },
+  {
+    "text": "Video conference (Zoom/Meet/Discord): "
+        "${ms < 150 ? "Sangat lancar — delay <150 ms, tidak ada gangguan"
+           : ms < 300 ? "Masih dapat diterima — delay mulai terasa oleh pengguna"
+           : "Delay terasa jelas — kualitas percakapan terganggu"}",
+    "status": ms < 150 ? "good" : ms < 300 ? "warn" : "bad",
+  },
+  {
+    "text": "Gaming online & cloud gaming: "
+        "${ms < 100 ? "Optimal — delay <100 ms, respons game sangat baik"
+           : ms < 150 ? "Baik — delay 100–150 ms, masih playable"
+           : ms < 300 ? "Terasa lag — responsiveness turun, QoE terdampak"
+           : "Tidak nyaman dimainkan — delay melebihi toleransi gaming"}",
+    "status": ms < 100 ? "good" : ms < 150 ? "good" : ms < 300 ? "warn" : "bad",
+  },
+];
 
   List<Map<String, String>> _impactJitter(double ms) => [
-    {"text": "VoIP & Video Call: ${ms < 75 ? "Sangat jernih" : ms < 125 ? "Normal" : "Putus-putus"}", "status": ms < 75 ? "good" : "warn"},
-  ];
+  {
+    "text": "Kategori TIPHON: "
+        "${ms < 75 ? "Sangat Baik (<75 ms) — variasi delay sangat kecil"
+           : ms < 125 ? "Baik (75–125 ms) — variasi delay dalam toleransi"
+           : ms < 225 ? "Sedang (125–225 ms) — mulai mengganggu aplikasi real-time"
+           : "Buruk (>225 ms) — degradasi kualitas signifikan "}",
+    "status": ms < 75 ? "good" : ms < 125 ? "good" : ms < 225 ? "warn" : "bad",
+  },
+  {
+    "text": "VoIP & video conference: "
+        "${ms < 75 ? "Jernih — jitter kecil, audio/video stabil"
+           : ms < 125 ? "Kadang berfluktuasi — buffer dapat mengatasi"
+           : "Sering terputus — jitter melampaui kapasitas de-jitter buffer"}",
+    "status": ms < 75 ? "good" : ms < 125 ? "warn" : "bad",
+  },
+
+  {
+    "text": "Cloud gaming & streaming: "
+        "${ms < 75 ? "Halus — tidak ada frozen frame, immersion terjaga"
+           : ms < 125 ? "Sesekali tersendat — frozen frame mungkin terjadi"
+           : "Frame sering freeze — QoE gaming sangat terdampak"}",
+    "status": ms < 75 ? "good" : ms < 125 ? "warn" : "bad",
+  },
+];
 
   List<Map<String, String>> _impactSINR(double sinr) => [
-    {"text": "Kualitas link WiFi: ${kualitasSinyalWifi(sinr)}", "status": sinr >= 15 ? "good" : "warn"},
-  ];
+  {
+    "text": "Pengaruh terhadap parameter QoS: "
+        "${sinr >= 25 ? "Minimal — SINR tinggi, interferensi rendah, QoS stabil"
+           : sinr >= 15 ? "Moderat — interferensi mulai mempengaruhi throughput"
+           : sinr >= 10 ? "Signifikan — SINR rendah menurunkan throughput & menaikkan delay"
+           : "Kritis — interferensi tinggi, semua parameter QoS terdampak"}",
+    "status": sinr >= 25 ? "good" : sinr >= 15 ? "good" : sinr >= 10 ? "warn" : "bad",
+  },
+  {
+    "text": "Stabilitas koneksi WiFi: "
+        "${sinr >= 25 ? "Sangat stabil — SINR ≥25 dB, koneksi konsisten"
+           : sinr >= 15 ? "Stabil — SINR 15–25 dB, performa cukup baik"
+           : sinr >= 10 ? "Tidak stabil — SINR 10–15 dB, sering retransmisi"
+           : "Sangat tidak stabil — SINR <10 dB, koneksi sering putus"}",
+    "status": sinr >= 25 ? "good" : sinr >= 15 ? "good" : sinr >= 10 ? "warn" : "bad",
+  },
+  {
+    "text": "Indeks QoS keseluruhan: "
+        "${sinr >= 25 ? "Kategori Sangat Memuaskan (indeks ~93–100%)"
+           : sinr >= 15 ? "Kategori Baik (indeks ~75–93%)"
+           : sinr >= 10 ? "Kategori Cukup (indeks ~50–75%) — perlu perbaikan posisi"
+           : "Kategori Buruk (indeks <50%) — interferensi tinggi "}",
+    "status": sinr >= 25 ? "good" : sinr >= 15 ? "good" : sinr >= 10 ? "warn" : "bad",
+  },
+];
 
   // ── EXTRA INFO ────────────────────────────────────────────────────────
   // [FIX 3] Hapus akses d.ssid, d.band, d.ip — field tidak ada di DataQoS.
   // Informasi yang ditampilkan hanya dari 4 parameter terukur.
 
 List<Map<String, String>> _extraThroughput(DataQoS d, List<double> hist) => [
-  {"key": "Sumber Pengukuran", "value": "Monitoring jaringan lokal (real-time)"},
-  {"key": "Throughput Saat Ini", "value": "${d.throughput.toStringAsFixed(2)} Mbps"},
-  {"key": "Utilisasi (ref. 300 Mbps)", "value": utilisasiBand(d.throughput)},
-  {"key": "Tren", "value": hitungTren(hist)},
+  {"key": "Threshold Kategori", "value": ">10 Sangat Baik | 5–10 Baik | 1–5 Sedang | <1 Buruk"},
+  {"key": "Throughput Kini",    "value": "${d.throughput.toStringAsFixed(2)} Mbps"},
+  {"key": "Utilisasi Kanal",    "value": utilisasiBand(d.throughput)},
+  {"key": "Tren",               "value": hitungTren(hist)},
 ];
 
   List<Map<String, String>> _extraDelay(DataQoS d, List<double> hist) => [
-    {"key": "Metode Pengukuran", "value": "Delay antar paket jaringan"},
-    {"key": "RTT Estimasi",      "value": hitungRTT(d.delay)},
-    {"key": "Rata-rata",         "value": "${_avg(hist).toStringAsFixed(2)} ms"},
-    {"key": "Tren",              "value": hitungTren(hist, invertedGood: true)},
-  ];
+  {"key": "Threshold Kategori", "value": "<150 SB | 150–300 B | 300–450 S | >450 Buruk (ms)"},
+  {"key": "RTT Estimasi",       "value": hitungRTT(d.delay)},
+  {"key": "Rata-rata",          "value": "${_avg(hist).toStringAsFixed(2)} ms"},
+  {"key": "Tren",               "value": hitungTren(hist, invertedGood: true)},
+];
 
   List<Map<String, String>> _extraJitter(DataQoS d, List<double> hist) => [
-    {"key": "Cara Hitung", "value": "Variasi delay antar paket"},
-    {"key": "Rata-rata",   "value": "${_avg(hist).toStringAsFixed(2)} ms"},
-    {"key": "Tren",        "value": hitungTren(hist, invertedGood: true)},
-  ];
+  {"key": "Threshold Kategori", "value": "<75 SB | 75–125 B | 125–225 S | >225 Buruk (ms)"},
+  {"key": "Dampak Real-time",   "value": "Jitter tinggi → frozen frame & audio putus"},
+  {"key": "Rata-rata",          "value": "${_avg(hist).toStringAsFixed(2)} ms"},
+  {"key": "Tren",               "value": hitungTren(hist, invertedGood: true)},
+];
 
   List<Map<String, String>> _extraSINR(DataQoS d, List<double> hist) {
-    // [FIX 4] Tanpa field band, gunakan noise floor rata-rata WiFi (-93 dBm)
-    const noiseFloor   = -93.0;
-    final rssiEstimasi = d.sinr + noiseFloor;
-    return [
-      {"key": "Cara Hitung",    "value": "SINR = RSSI − Noise Floor"},
-      {"key": "RSSI Estimasi",  "value": "${rssiEstimasi.toStringAsFixed(1)} dBm"},
-      {"key": "Noise Floor",    "value": "$noiseFloor dBm (rata-rata WiFi)"},
-      {"key": "Kualitas Link",  "value": estimasiKualitasLink(d.sinr)},
-      {"key": "Tren",           "value": hitungTren(hist)},
-    ];
-  }
+  const noiseFloor   = -93.0;
+  final rssiEstimasi = d.sinr + noiseFloor;
+  return [
+    {"key": "RSSI Estimasi",    "value": "${rssiEstimasi.toStringAsFixed(1)} dBm"},
+    {"key": "Noise Floor",      "value": "$noiseFloor dBm (asumsi WiFi rata-rata)"},
+    {"key": "Dampak Interferensi","value": "SINR rendah terbukti turunkan indeks QoS 18% "},
+    {"key": "Kualitas Link",    "value": estimasiKualitasLink(d.sinr)},
+    {"key": "Tren",             "value": hitungTren(hist)},
+  ];
+}
 
   // ── PARAMETER CARD ────────────────────────────────────────────────────
   Widget _paramCard({
@@ -535,7 +627,7 @@ Widget _heroCard(double throughputMbps, String kategori) {
     ),
     child: Column(
       children: [
-        const Text("KECEPATAN UNDUH",
+        const Text("KECEPATAN TRAFFIC",
             style: TextStyle(fontSize: 11, color: textSec)),
 
         const SizedBox(height: 6),
@@ -589,7 +681,7 @@ Widget _heroCard(double throughputMbps, String kategori) {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text("Kecepatan unduh realtime",
+              const Text("Kecepatan traffic realtime",
                   style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
               Text("${histThroughput.length} data",
                   style: const TextStyle(fontSize: 10, color: textSec)),
@@ -733,7 +825,7 @@ Widget build(BuildContext context) {
                       title: "Delay", emoji: "⏱️",
                       value: delay, unit: "ms",
                       threshold: "<150 ms", kategori: katDelay,
-                      subtitle: "Delay antar paket VPN",
+                      subtitle: "Delay antar paket",
                       history: histDelay,
                       thresholds: const [
                         {"label": "Sangat Baik", "value": "< 150 ms"},

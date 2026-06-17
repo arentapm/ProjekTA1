@@ -14,6 +14,10 @@ import '../database/db_helper.dart';
 // 2. Seluruh logika poll, buffer, DB insert dipindah ke sini langsung
 // 3. Guard duplicate timestamp pada file rx_bytes.txt
 // 4. SINR cache dengan TTL 30 detik
+// 5. [NEW FIX] requestPermission DIHAPUS dari onStart —
+//    permission_handler butuh Activity Android yang tidak tersedia
+//    di background isolate → PlatformException. Permission harus
+//    diminta dari UI (DashboardPage) sebelum service distart.
 // ════════════════════════════════════════════════════════════════════
 
 @pragma('vm:entry-point')
@@ -24,18 +28,18 @@ void startCallback() {
 class QosTaskHandler extends TaskHandler {
 
   // ── State throughput ─────────────────────────────────────────
-  int _lastRxBytes = 0;
-  int _lastRxTimestamp = 0;
-  int _lastProcessedTs = 0;     // ✅ FIX: guard duplicate timestamp file
-  double _lastThroughput = 0.0;
-  bool _hasThroughput = false;
+  int     _lastRxBytes       = 0;
+  int     _lastRxTimestamp   = 0;
+  int     _lastProcessedTs   = 0;   // guard duplicate timestamp file
+  double  _lastThroughput    = 0.0;
+  bool    _hasThroughput     = false;
   String? _rxFilePath;
 
   // ── State QoS terbaru ─────────────────────────────────────────
   DataQoS? _latestQoS;
-  int _mlBufferCount = 0;
-  int _exportBufferCount = 0;
-  double? _lastPrediction;
+  int      _mlBufferCount     = 0;
+  int      _exportBufferCount = 0;
+  double?  _lastPrediction;
 
   // ── Cache info WiFi ───────────────────────────────────────────
   String _cachedSSID = 'Unknown';
@@ -52,19 +56,35 @@ class QosTaskHandler extends TaskHandler {
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
     print('[TaskHandler] START');
-    await NetworkService.requestPermission();
+
+    // ✅ FIX: requestPermission DIHAPUS dari sini.
+    //
+    // Root cause error:
+    //   PlatformException(PermissionHandler.PermissionManager,
+    //   Unable to detect current Android Activity., null, null)
+    //
+    // permission_handler membutuhkan Activity Android yang aktif
+    // untuk menampilkan dialog permission. Background isolate
+    // (flutter_foreground_task) tidak memiliki Activity →
+    // PlatformException crash.
+    //
+    // Solusi: permission HARUS diminta dari UI (DashboardPage._startMonitoring)
+    // SEBELUM service ini distart. Lihat dashboard_page.dart.
+    //
+    // Di sini hanya log, tidak ada permission request sama sekali.
+    print('[TaskHandler] isolate siap, permission sudah dihandle di UI');
   }
 
   @override
   void onRepeatEvent(DateTime timestamp) async {
-    // ✅ FIX: Semua logika ada di sini, tidak bergantung pada singleton
+    // ✅ Semua logika ada di sini, tidak bergantung pada singleton
     // Baca throughput dari file Kotlin
     await _readThroughputFromFile();
 
-    // Jalankan poll QoS (sama seperti _runPoll di MonitoringController)
+    // Jalankan poll QoS
     await _runPoll();
 
-    // Kirim data ke main isolate via sendDataToMain
+    // Kirim data ke main isolate
     _sendToMain();
   }
 
@@ -89,7 +109,8 @@ class QosTaskHandler extends TaskHandler {
 
   Future<void> _readThroughputFromFile() async {
     try {
-      _rxFilePath ??= '/data/user/0/com.example.flutter_application_1/files/rx_bytes.txt';
+      _rxFilePath ??=
+          '/data/user/0/com.example.flutter_application_1/files/rx_bytes.txt';
 
       final file = File(_rxFilePath!);
       if (!await file.exists()) {
@@ -98,7 +119,7 @@ class QosTaskHandler extends TaskHandler {
       }
 
       final content = await file.readAsString();
-      final parts = content.trim().split(',');
+      final parts   = content.trim().split(',');
       if (parts.length < 2) return;
 
       final rx = int.tryParse(parts[0]) ?? -1;
@@ -106,7 +127,7 @@ class QosTaskHandler extends TaskHandler {
 
       if (rx < 0 || ts <= 0) return;
 
-      // ✅ FIX BUG 1: Skip jika file belum diupdate (timestamp sama)
+      // FIX: Skip jika file belum diupdate (timestamp sama)
       // Ini root cause throughput frozen
       if (ts == _lastProcessedTs) {
         print('[TaskHandler] file belum diupdate (ts=$ts sama), skip throughput');
@@ -156,6 +177,15 @@ class QosTaskHandler extends TaskHandler {
     _isPollBusy = true;
 
     try {
+      // ✅ FIX: Gunakan hasPermission() — hanya CEK status,
+      // tidak memanggil dialog, aman di background isolate.
+      // Berbeda dengan requestPermission() yang butuh Activity.
+      final hasPermission = await NetworkService.hasPermission();
+      if (!hasPermission) {
+        print('[TaskHandler] permission belum diberikan, skip poll');
+        return;
+      }
+
       final connected = await NetworkService.isWifiConnected();
       if (!connected) {
         print('[TaskHandler] WiFi tidak terhubung, skip poll');
@@ -180,7 +210,7 @@ class QosTaskHandler extends TaskHandler {
       final throughputValue = _hasThroughput ? _lastThroughput : 0.0;
 
       final qos = DataQoS(
-        timestamp:  DateTime.now(),   // ✅ Selalu fresh timestamp
+        timestamp:  DateTime.now(),   // selalu fresh timestamp
         throughput: throughputValue,
         delay:      probe.delayMs,
         jitter:     probe.jitterMs,
@@ -192,9 +222,9 @@ class QosTaskHandler extends TaskHandler {
         return;
       }
 
-      // Insert ke DB — timestamp dari DataQoS, bukan override
+      // Insert ke DB
       final idQos = await DBHelper.insertQoS(qos.toMap());
-      _latestQoS = qos.copyWith(idQos: idQos);
+      _latestQoS  = qos.copyWith(idQos: idQos);
 
       _exportBufferCount++;
       print('[TaskHandler] poll OK id_qos=$idQos '
@@ -212,8 +242,8 @@ class QosTaskHandler extends TaskHandler {
 
   bool _isValidQoS(DataQoS q) {
     return q.throughput.isFinite &&
-        q.delay.isFinite &&
-        q.jitter.isFinite &&
+        q.delay.isFinite     &&
+        q.jitter.isFinite    &&
         q.sinr.isFinite;
   }
 
@@ -227,9 +257,9 @@ class QosTaskHandler extends TaskHandler {
     FlutterForegroundTask.sendDataToMain({
       'hasData':    latest != null,
       'throughput': latest?.throughput ?? 0.0,
-      'delay':      latest?.delay ?? 0.0,
-      'jitter':     latest?.jitter ?? 0.0,
-      'sinr':       latest?.sinr ?? 0.0,
+      'delay':      latest?.delay      ?? 0.0,
+      'jitter':     latest?.jitter     ?? 0.0,
+      'sinr':       latest?.sinr       ?? 0.0,
       'timestamp':  latest?.timestamp.toIso8601String() ?? '',
       'mlLen':      _mlBufferCount,
       'exportLen':  _exportBufferCount,

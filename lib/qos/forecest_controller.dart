@@ -139,6 +139,64 @@ class ForecastController {
     }
   }
 
+  // TAMBAH method baru di ForecastController
+
+Future<Map<String, dynamic>?> runFutureForecast() async {
+
+  if (isForecasting) return null;
+  isForecasting = true;
+
+  try {
+    // Ambil SEMUA data dari SQLite, tidak dibatasi hari
+    final history = await DBHelper.getQoSHistoryAsc(); // ambil semua
+
+    if (history.length < 111) {
+      print('[Forecast] data belum cukup: ${history.length}/111');
+      return {'status': 'waiting', 'message': 'Data belum cukup: ${history.length}/111'};
+    }
+
+    // Format input
+    final inputData = history.map((row) => [
+      (row['throughput'] as num).toDouble(),
+      (row['delay']      as num).toDouble(),
+      (row['jitter']     as num).toDouble(),
+      (row['sinr']       as num).toDouble(),
+    ]).toList();
+
+    // Panggil endpoint baru
+    final result = await MLService.runForecastFuture(inputData: inputData);
+
+    if (result == null || result['status'] != 'success') return result;
+
+    final predictions = result['predictions'] as List<double>;
+
+    // =====================================================
+    // SIMPAN KE SQLITE
+    // Setiap titik = interval 30 menit
+    // =====================================================
+    await DBHelper.clearOldForecast(); // bersihkan forecast lama
+
+    final now = DateTime.now();
+    for (int i = 0; i < predictions.length; i++) {
+      await DBHelper.insertForecast(
+        forecastTime   : now.add(Duration(minutes: (i + 1) * 30)),
+        predictedQos   : predictions[i],
+        horizonMinutes : (i + 1) * 30,
+        modelName      : 'MSSA-LSTM',
+      );
+    }
+
+    print('[Forecast] Tersimpan ${predictions.length} titik prediksi');
+    return result;
+
+  } catch (e) {
+    print('[Forecast] ERROR: $e');
+    return null;
+  } finally {
+    isForecasting = false;
+  }
+}
+  
   // =========================================================
   // LOAD FORECAST FROM DB
   // =========================================================

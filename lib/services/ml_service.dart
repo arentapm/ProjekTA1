@@ -4,7 +4,7 @@ import 'package:http/http.dart' as http;
 class MLService {
 
   static const String baseUrl =
-      'http://192.168.137.1:8000';
+      'https://netpredict.cloud';
 
   static Future<Map<String, dynamic>?> runForecast({
     required List<List<double>> inputData,
@@ -102,4 +102,59 @@ class MLService {
       return null;
     }
   }
+
+  static Future<Map<String, dynamic>?> runForecastFuture({
+  required List<List<double>> inputData,
+}) async {
+  try {
+    print('[MLService] Mengirim request ke $baseUrl/predict_future');
+    print('[MLService] Input rows: ${inputData.length}');
+
+    final response = await http.post(
+      Uri.parse('$baseUrl/predict_future'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'input': inputData}),
+    );
+
+    print('[MLService] Status code: ${response.statusCode}');
+    print('[MLService] Raw body: ${response.body}');  
+
+    if (response.statusCode == 202) {
+      final decoded = jsonDecode(response.body);
+      return {'status': 'waiting', 'message': decoded['message']};
+    }
+
+    if (response.statusCode != 200) return null;
+
+    final decoded = jsonDecode(response.body);
+    print('[MLService] Decoded keys: ${decoded.keys.toList()}');
+    print('[MLService] Status value: ${decoded['status']}');
+    print('[MLService] Predictions value: ${decoded['predictions']}');
+
+    if (decoded['status'] != 'success') {
+      print('[MLService] Status bukan success: ${decoded['status']}');
+      return null;
+    }
+
+    final rawList = decoded['predictions'];
+    print('[MLService] rawList type: ${rawList.runtimeType}');
+
+    if (rawList == null || (rawList as List).isEmpty) {
+      print('[MLService] rawList null atau kosong');
+      return null;
+    }
+
+    return {
+      'status'      : 'success',
+      'predictions' : List<double>.from(
+        rawList.map((e) => (e as num).toDouble()),
+      ),
+    };
+
+  } catch (e, s) {
+    print('[MLService] EXCEPTION: $e');
+    print('[MLService] STACKTRACE: $s');
+    return null;
+  }
+}
 }
