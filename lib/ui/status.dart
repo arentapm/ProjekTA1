@@ -57,6 +57,7 @@ class _SystemStatusPageState extends State<SystemStatusPage> {
   Timer?         _uptimeTimer;
   Timer?         _autoRefreshTimer;
   Timer?         _backendTimer;
+  Timer?         _dbCountTimer; // FIX BUG#2: timer khusus refresh jumlah baris DB
   int           _totalDbRows     = 0;
   int _sessionRows     = 0;   
   int _rowsAtStart     = 0; 
@@ -132,6 +133,7 @@ Future<DateTime?> _getLastSyncFromDb() async {
   void dispose() {
     _uptimeTimer?.cancel();
     _autoRefreshTimer?.cancel();
+    _dbCountTimer?.cancel(); // FIX BUG#2: jangan lupa cancel timer baru
     super.dispose();
   }
 
@@ -182,7 +184,10 @@ Future<DateTime?> _getLastSyncFromDb() async {
     }
   }
 
-   // ✅ Refresh count setiap interval — fix dari versi sebelumnya
+   // ✅ Refresh count setiap interval
+   // FIX BUG#2: fungsi ini sebelumnya tidak pernah dipanggil oleh siapa pun
+   // (orphan function) — sekarang dipanggil berkala lewat _dbCountTimer
+   // yang dibuat di _startAutoRefreshTimer().
   Future<void> _refreshDbCount() async {
     final count = await _getDbCount();
     if (mounted) {
@@ -199,6 +204,15 @@ Future<DateTime?> _getLastSyncFromDb() async {
       if (mounted && !_isCheckingConnection) {
         _checkBackendConnection(silent: true);
       }
+    });
+
+    // FIX BUG#2: timer terpisah khusus untuk refresh jumlah baris DB,
+    // dijalankan lebih sering (5 detik) supaya "Total Data" di kartu
+    // Status Sesi & Sistem dan "Data tersedia" di Export Data Monitoring
+    // sama-sama mengikuti data real-time yang masuk dari background
+    // service, bukan beku di nilai awal saat halaman pertama dibuka.
+    _dbCountTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (mounted) _refreshDbCount();
     });
   }
 
@@ -373,7 +387,7 @@ Future<void> _checkBackendConnection({bool silent = false}) async {
     final chipBg = isLoading
         ? const Color(0xFFFAEEDA)
         : isHealthy ? const Color(0xFFEAF3DE) : const Color(0xFFFCEBEB);
-    final chipLabel = isLoading ? "Mengecek..." : isHealthy ? "Healthy" : "Offline";
+    final chipLabel = isLoading ? "Mengecek..." : isHealthy ? "Online" : "Offline";
     final chipIcon  = isLoading
         ? Icons.sync_rounded
         : isHealthy ? Icons.check_circle_outline_rounded : Icons.error_outline_rounded;
@@ -386,7 +400,7 @@ Future<void> _checkBackendConnection({bool silent = false}) async {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              "System Status",
+              "Status Sistem",
               style: TextStyle(
                   fontSize: 22,
                   fontWeight: FontWeight.w700,
@@ -570,7 +584,8 @@ Future<void> _checkBackendConnection({bool silent = false}) async {
       children: [
         _infoRow(Icons.timer_outlined,        "Uptime Sesi", _uptimeString),
         const SizedBox(height: 10),
-        // ✅ Pakai _totalDbRows — seluruh data di DB
+        // ✅ Pakai _totalDbRows — seluruh data di DB, sekarang real-time
+        // berkat _dbCountTimer (FIX BUG#2)
         _infoRow(Icons.storage_rounded, "Total Data", "$_totalDbRows sampel"),
         const SizedBox(height: 10),
         _infoRow(Icons.sync_rounded,          "Last Sync",   _lastFetchLabel),
@@ -637,7 +652,9 @@ Future<void> _checkBackendConnection({bool silent = false}) async {
                     const Text("Data tersedia",
                         style: TextStyle(fontSize: 12, color: _textSec)),
                     const Spacer(),
-                    // ✅ Dari exportBuffer — seluruh data sesi tanpa batas
+                    // ✅ FIX BUG#2: _totalDbRows sekarang ter-refresh
+                    // otomatis tiap 5 detik lewat _dbCountTimer, jadi
+                    // angka ini tidak lagi macet di 0.
                     Text(
                       "$_totalDbRows sampel",
                       style: const TextStyle(

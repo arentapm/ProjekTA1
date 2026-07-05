@@ -11,19 +11,20 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 // NetworkService — Pengukuran QoS WiFi (4 Parameter: Throughput,
 //                 Delay, Jitter, SINR)
 //
-// FIX UTAMA (permission):
+// (permission):
 //   requestPermission() = menampilkan dialog → HANYA dari UI/foreground
 //   hasPermission()     = cek status saja    → AMAN dari background isolate
 //
 // Semua fungsi internal yang dipanggil dari background isolate
 // (getWifiSnapshot, getScanNeighborAPs, getSSID, getBSSID, getIPAddress)
-// TIDAK boleh memanggil requestPermission() — diganti hasPermission() check.
 //
 // Definisi parameter final:
 //   throughput = bytes_diterima × 8 / (waktu_detik × 1.000.000) [Mbps]
 //   delay      = rata-rata RTT [ms]
 //   jitter     = Σ|RTT[i] - RTT[i-1]| / N [ms]
 //   sinr       = 10 × log10( P_sinyal / (P_interferensi + P_noise) ) [dB]
+//                model interferensi: co-channel vs adjacent-channel
+//                (IEEE 802.11)
 // ════════════════════════════════════════════════════════════════════
 
 class NetworkService {
@@ -49,7 +50,7 @@ class NetworkService {
   // ════════════════════════════════════════════════════════════════
   // PERMISSION
   //
-  // ATURAN KETAT:
+  // ATURAN :
   //   requestPermission() → HANYA dipanggil dari UI (DashboardPage)
   //                         sebelum service background distart.
   //                         Memanggil ini dari background isolate
@@ -62,7 +63,6 @@ class NetworkService {
   // ════════════════════════════════════════════════════════════════
 
   /// Tampilkan dialog permission — HANYA dari UI/foreground.
-  /// Jangan panggil dari background isolate / TaskHandler.
   static Future<void> requestPermission() async {
     if (!await Permission.location.isGranted) {
       await Permission.location.request();
@@ -70,7 +70,6 @@ class NetworkService {
   }
 
   /// Cek status permission tanpa membuka dialog.
-  /// Aman dipanggil dari background isolate.
   static Future<bool> hasPermission() async {
     return await Permission.location.isGranted;
   }
@@ -235,48 +234,60 @@ class NetworkService {
   }
 
   static Future<double?> _singleProbe(String host) async {
-    try {
-      final client = HttpClient();
-      client.connectionTimeout = Duration(milliseconds: _probeTimeoutMs);
+  try {
+    final client = HttpClient();
+    client.connectionTimeout = Duration(milliseconds: _probeTimeoutMs);
 
-      final stopwatch = Stopwatch()..start();
+    final stopwatch = Stopwatch()..start();
 
-      final request = await client
-          .headUrl(Uri.parse(host))
-          .timeout(Duration(milliseconds: _probeTimeoutMs));
-      request.headers.set('Connection', 'close');
+    final request = await client
+        .headUrl(Uri.parse(host))
+        .timeout(Duration(milliseconds: _probeTimeoutMs));
+    request.headers.set('Connection', 'close');
 
-      final response = await request
-          .close()
-          .timeout(Duration(milliseconds: _probeTimeoutMs));
+    final response = await request
+        .close()
+        .timeout(Duration(milliseconds: _probeTimeoutMs));
 
-      await response.drain<void>();
+    await response.drain<void>();
 
-      stopwatch.stop();
-      client.close();
+    stopwatch.stop();
+    client.close();
 
-      if (response.statusCode >= 200 && response.statusCode < 500) {
-        return stopwatch.elapsedMilliseconds.toDouble();
-      }
-      return null;
-    } on TimeoutException {
-      return null;
-    } catch (_) {
-      return null;
+    if (response.statusCode >= 200 && response.statusCode < 500) {
+      return stopwatch.elapsedMilliseconds.toDouble();
     }
+    return null;
+  } on TimeoutException {
+    return null;
+  } catch (_) {
+    return null;
   }
+}
 
-  static Future<bool> _isHostReachable(String host) async {
-    final rtt = await _singleProbe(host);
-    return rtt != null;
-  }
+static Future<bool> _isHostReachable(String host) async {
+  final rtt = await _singleProbe(host);
+  return rtt != null;
+}
 
   // ════════════════════════════════════════════════════════════════
-  // SINR — Estimasi Dinamis
+  // SINR — Estimasi Dinamis (model IEEE 802.11: co-channel vs
+  //        adjacent-channel)
   //
   // SINR (dB) = 10 × log10( P_signal / (P_interference + P_noise) )
-  //   dengan semua P dalam satuan linear mW:
-  //     P_mW = 10^(dBm / 10)
+  //   dengan semua P dalam satuan linear mW: P_mW = 10^(dBm / 10)
+  //
+  // Interferensi dari AP tetangga dibedakan jadi 3 kategori
+  // berdasarkan jarak frekuensinya terhadap channel yang sedang
+  // dipakai (currentChannelMhz):
+  //   - Co-channel   (channel persis sama)        → interferensi penuh
+  //   - Adjacent     (channel berdekatan)          → direduksi 20 dB
+  //                                                  (filter WiFi
+  //                                                  meredam sebagian)
+  //   - Channel jauh (selisih > ambang)             → diabaikan
+  //
+  // Ambang "berdekatan": ≤20 MHz untuk 5 GHz, <25 MHz untuk 2.4 GHz
+  // (mengikuti lebar channel WiFi standar).
   //
   // Referensi:
   //   Goldsmith, "Wireless Communications", Cambridge UP, 2005.
@@ -285,36 +296,67 @@ class NetworkService {
 
   static double estimateSINR({
     required double           rssiDbm,
-    required bool             is5GHz,
+    required int?             currentChannelMhz,
     required List<NeighborAP> neighborAPs,
   }) {
+    final bool is5GHzBand = (currentChannelMhz ?? 0) >= 4900;
+
+    // Validasi RSSI sinyal sendiri
     if (rssiDbm <= -110 || rssiDbm >= 0) {
-      return is5GHz ? 5.0 : 3.0;
+      return is5GHzBand ? 5.0 : 3.0;
+    }
+
+    // Validasi frekuensi channel
+    if (currentChannelMhz == null || currentChannelMhz <= 0) {
+      return is5GHzBand ? 5.0 : 3.0;
     }
 
     // Noise floor (karakteristik fisik, IEEE 802.11-2020 Annex E)
-    final double noiseFloorDbm = is5GHz ? -95.0 : -92.0;
+    final double noiseFloorDbm = is5GHzBand ? -95.0 : -92.0;
 
-    final sameBandAPs = neighborAPs.where((ap) {
-      if (ap.rssiDbm <= -110 || ap.rssiDbm >= 0) return false;
-      if (is5GHz) return ap.frequencyMhz >= 4900;
-      return ap.frequencyMhz < 4900 && ap.frequencyMhz >= 2400;
-    }).toList();
+    // ── Jumlahkan interferensi, dibedakan co-channel vs adjacent ──
+    int    coChannelCount       = 0;
+    int    adjChannelCount      = 0;
+    double interferenceLinearMw = 0.0;
 
-    final double interferenceDbm;
+    for (final ap in neighborAPs) {
+      if (ap.rssiDbm <= -110 || ap.rssiDbm >= 0) continue;
 
-    if (sameBandAPs.isEmpty) {
-      interferenceDbm = is5GHz ? -90.0 : -85.0;
-      print('[NetworkService] SINR: tidak ada AP tetangga, '
-          'pakai interferensi statis = $interferenceDbm dBm');
-    } else {
-      double totalMw = 0.0;
-      for (final ap in sameBandAPs) {
-        totalMw += _dbmToMw(ap.rssiDbm);
+      final relasi = _cekRelasiChannel(
+        currentMhz:  currentChannelMhz,
+        neighborMhz: ap.frequencyMhz,
+        is5GHz:      is5GHzBand,
+      );
+
+      switch (relasi) {
+        case _ChannelRelasi.sama:
+          coChannelCount++;
+          interferenceLinearMw += _dbmToMw(ap.rssiDbm);
+          break;
+        case _ChannelRelasi.berdekatan:
+          adjChannelCount++;
+          // 20 dB reduksi = faktor 1/100 dalam skala linear
+          interferenceLinearMw += _dbmToMw(ap.rssiDbm) / 100.0;
+          break;
+        case _ChannelRelasi.jauh:
+          break;
       }
-      interferenceDbm = _mwToDbm(totalMw);
-      print('[NetworkService] SINR: ${sameBandAPs.length} AP tetangga, '
-          'interferensi total = ${interferenceDbm.toStringAsFixed(1)} dBm');
+    }
+
+    // ── Konversi interferensi ke dBm, dengan clamping ─────────────
+    // Batas atas -70 dBm (realistis untuk interferensi agregat).
+    // Batas bawah noiseFloorDbm - 10 dBm (tidak lebih kecil dari noise).
+    final double interferenceDbm;
+    if (interferenceLinearMw <= 0) {
+      interferenceDbm = noiseFloorDbm - 10.0;
+      print('[NetworkService] SINR: tidak ada interferensi co/adjacent-channel, '
+          'pakai dasar = ${interferenceDbm.toStringAsFixed(1)} dBm');
+    } else {
+      final double rawDbm = _mwToDbm(interferenceLinearMw);
+      interferenceDbm = rawDbm.clamp(noiseFloorDbm - 10.0, -70.0);
+      print('[NetworkService] SINR: $coChannelCount co-channel, '
+          '$adjChannelCount adjacent-channel, '
+          'interferensi = ${interferenceDbm.toStringAsFixed(1)} dBm');
     }
 
     final double pSignal       = _dbmToMw(rssiDbm);
@@ -334,6 +376,25 @@ class NetworkService {
         'SINR=${sinrDb.toStringAsFixed(2)} dB');
 
     return sinrDb;
+  }
+
+  /// Tentukan relasi channel AP tetangga terhadap channel sendiri:
+  /// co-channel (sama), adjacent (berdekatan), atau jauh (diabaikan).
+  static _ChannelRelasi _cekRelasiChannel({
+    required int  currentMhz,
+    required int  neighborMhz,
+    required bool is5GHz,
+  }) {
+    final int diff = (currentMhz - neighborMhz).abs();
+    if (is5GHz) {
+      if (diff == 0)  return _ChannelRelasi.sama;
+      if (diff <= 20) return _ChannelRelasi.berdekatan;
+      return _ChannelRelasi.jauh;
+    } else {
+      if (diff == 0)  return _ChannelRelasi.sama;
+      if (diff < 25)  return _ChannelRelasi.berdekatan;
+      return _ChannelRelasi.jauh;
+    }
   }
 
   static double _dbmToMw(double dbm) => pow(10.0, dbm / 10.0).toDouble();
@@ -465,10 +526,13 @@ class NetworkService {
       print('[NetworkService] scan tetangga gagal: $e');
     }
 
+    // ✅ Pakai frekuensi asli (currentChannelMhz), bukan cuma flag
+    // is5GHz — diperlukan untuk membedakan co-channel vs
+    // adjacent-channel pada model interferensi IEEE 802.11.
     final sinr = estimateSINR(
-      rssiDbm:     signalPower,
-      is5GHz:      band5g,
-      neighborAPs: neighbors,
+      rssiDbm:           signalPower,
+      currentChannelMhz: freq,
+      neighborAPs:       neighbors,
     );
 
     return WiFiSnapshot(
@@ -610,3 +674,10 @@ class MethodChannelHelper {
   static final trafficStats = MethodChannel('com.example.app/traffic_stats');
   static final wifiNative   = MethodChannel('com.example.app/wifi');
 }
+
+// ════════════════════════════════════════════════════════════════════
+// _ChannelRelasi — kategori relasi channel AP tetangga vs channel
+// sendiri, dipakai internal oleh estimateSINR()
+// ════════════════════════════════════════════════════════════════════
+
+enum _ChannelRelasi { sama, berdekatan, jauh }

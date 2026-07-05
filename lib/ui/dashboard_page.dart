@@ -316,7 +316,10 @@ class _DashboardPageState extends State<DashboardPage> {
           child: Divider(height: 1, color: Colors.grey.shade200),
         ),
       ),
-      body: pages[_selectedIndex],
+      body: IndexedStack(
+        index:    _selectedIndex,
+        children: pages,
+      ),
       bottomNavigationBar: Container(
         decoration: BoxDecoration(
           color: Colors.white,
@@ -346,7 +349,7 @@ class _DashboardPageState extends State<DashboardPage> {
             BottomNavigationBarItem(
               icon: Icon(Icons.speed_outlined),
               activeIcon: Icon(Icons.speed_rounded),
-              label: 'Stability',
+              label: 'Prediksi',
             ),
             BottomNavigationBarItem(
               icon: Icon(Icons.info_outline_rounded),

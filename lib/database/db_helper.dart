@@ -6,14 +6,14 @@ import '../qos/MonitoringController.dart';
 // ════════════════════════════════════════════════════════════════════
 // DBHelper
 //
-// Tabel aktif (v4):
-//   - data_qos     : metrik QoS utama (id, timestamp, throughput, delay, jitter, sinr)
-//   - forecast_qos : hasil prediksi + evaluasi aktual (actual_qos, mae)
+// Tabel aktif (v5):
+//   - data_qos     : metrik QoS utama
+//   - forecast_qos : hasil prediksi + evaluasi aktual + interval_minutes
 // ════════════════════════════════════════════════════════════════════
 class DBHelper {
   static Database? _db;
 
-  static const int _dbVersion = 4;
+  static const int _dbVersion = 5;
   static const bool _isDevMode = false;
 
   // ── Get database ──────────────────────────────────────────────
@@ -39,7 +39,43 @@ class DBHelper {
       version: _dbVersion,
 
       onConfigure: (db) async {
-        await db.execute('PRAGMA foreign_keys = ON');
+        // FIX (stuck di splash / ANR saat startup):
+        // PRAGMA di bawah BISA tertahan kalau isolate lain (service
+        // background yang auto-restart setelah install ulang) sedang
+        // memegang lock di file DB yang sama. Dibungkus timeout supaya
+        // proses buka DB TIDAK PERNAH menunggu tanpa batas — kalau gagal/
+        // timeout, cukup di-skip (DB tetap bisa dipakai, cuma jalan di
+        // journal mode default), bukan bikin seluruh app macet.
+        try {
+          await db
+              .execute('PRAGMA foreign_keys = ON')
+              .timeout(const Duration(seconds: 5));
+        } catch (e) {
+          print('⚠️ PRAGMA foreign_keys gagal/timeout: $e');
+        }
+
+        try {
+          // WAL: izinkan baca (forecast/history query) berjalan BERSAMAAN
+          // dengan tulis (insert data aktual dari isolate background),
+          // tanpa saling block. Default rollback-journal mode mengunci
+          // seluruh file saat ada query panjang → insert data aktual
+          // dari foreground service jadi tertunda/gagal (data aktual "berhenti").
+          await db
+              .execute('PRAGMA journal_mode=WAL')
+              .timeout(const Duration(seconds: 5));
+        } catch (e) {
+          print('⚠️ PRAGMA journal_mode=WAL gagal/timeout (lanjut pakai mode default): $e');
+        }
+
+        try {
+          // Kalau tetap kebentur lock sesaat, retry max 3 detik sebelum
+          // error, alih-alih langsung gagal (SQLITE_BUSY).
+          await db
+              .execute('PRAGMA busy_timeout=3000')
+              .timeout(const Duration(seconds: 5));
+        } catch (e) {
+          print('⚠️ PRAGMA busy_timeout gagal/timeout: $e');
+        }
       },
 
       onCreate: (db, version) async {
@@ -55,41 +91,43 @@ class DBHelper {
   }
 
   // ── Create tables (fresh install — hanya tabel aktif) ─────────
-  static Future<void> _createTables(Database db) async {
-    await db.execute('''
-      CREATE TABLE data_qos (
-        id_qos     INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp  DATETIME NOT NULL,
-        throughput FLOAT,
-        delay      FLOAT,
-        jitter     FLOAT,
-        sinr       FLOAT
-      )
-    ''');
+static Future<void> _createTables(Database db) async {
+  await db.execute('''
+    CREATE TABLE data_qos (
+      id_qos     INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp  DATETIME NOT NULL,
+      throughput FLOAT,
+      delay      FLOAT,
+      jitter     FLOAT,
+      sinr       FLOAT
+    )
+  ''');
 
-    await db.execute(
-      'CREATE INDEX IF NOT EXISTS idx_qos_ts ON data_qos(timestamp DESC)',
-    );
+  await db.execute(
+    'CREATE INDEX IF NOT EXISTS idx_qos_ts ON data_qos(timestamp DESC)',
+  );
 
-    await db.execute('''
-      CREATE TABLE forecast_qos (
-        id_forecast     INTEGER PRIMARY KEY AUTOINCREMENT,
-        forecast_time   DATETIME NOT NULL,
-        predicted_qos   REAL     NOT NULL,
-        horizon_minutes INTEGER  NOT NULL,
-        model_name      TEXT,
-        created_at      DATETIME NOT NULL,
-        actual_qos      REAL,
-        mae             REAL
-      )
-    ''');
+  // Schema v5: sudah include interval_minutes dari awal
+  await db.execute('''
+    CREATE TABLE forecast_qos (
+      id_forecast      INTEGER PRIMARY KEY AUTOINCREMENT,
+      forecast_time    DATETIME NOT NULL,
+      predicted_qos    REAL     NOT NULL,
+      horizon_minutes  INTEGER  NOT NULL,
+      interval_minutes INTEGER  NOT NULL DEFAULT 30,
+      model_name       TEXT,
+      created_at       DATETIME NOT NULL,
+      actual_qos       REAL,
+      mae              REAL
+    )
+  ''');
 
-    await db.execute(
-      'CREATE INDEX IF NOT EXISTS idx_forecast_time ON forecast_qos(forecast_time ASC)',
-    );
+  await db.execute(
+    'CREATE INDEX IF NOT EXISTS idx_forecast_time ON forecast_qos(forecast_time ASC)',
+  );
 
-    print('✅ Tables created (v4 schema)');
-  }
+  print('✅ Tables created (v5 schema)');
+}
 
   // ════════════════════════════════════════════════════════════════
   // MIGRATION SYSTEM
@@ -173,9 +211,28 @@ class DBHelper {
 
           print('✅ Migration v4 selesai');
           break;
+
+          case 5:
+          print('➡️ Migration v5');
+          await db.execute(
+            'ALTER TABLE forecast_qos ADD COLUMN interval_minutes INTEGER NOT NULL DEFAULT 30',
+          );
+          print('✅ forecast_qos: kolom interval_minutes ditambahkan');
+          break;
       }
     }
   }
+
+  static Future<void> debugPrintAllForecasts() async {
+  final db   = await database;
+  final rows = await db.query('forecast_qos', orderBy: 'created_at DESC');
+  print('========== FORECAST QOS (${rows.length} rows) ==========');
+  for (final r in rows) {
+    print('id=${r['id_forecast']} created=${r['created_at']} '
+          'target=${r['forecast_time']} pred=${r['predicted_qos']} '
+          'actual=${r['actual_qos']} mae=${r['mae']}');
+  }
+}
 
   // =========================================================
   // INSERT QOS
@@ -191,7 +248,8 @@ class DBHelper {
   }
 
   // =========================================================
-  // GET HISTORY ASC — untuk forecasting
+  // GET HISTORY ASC — untuk forecasting (LEGACY, tidak dipakai lagi
+  // oleh runFutureForecast — lihat getQoSHistoryRecent di bawah)
   // =========================================================
   static Future<List<Map<String, dynamic>>> getQoSHistoryAsc() async {
   final db   = await database;
@@ -203,6 +261,35 @@ class DBHelper {
   print('📊 HISTORY ASC: ${rows.length} rows → dikirim ke backend');
   return rows;
 }
+
+  // =========================================================
+  // GET HISTORY RECENT — N baris terakhir saja (ASC)
+  //
+  // FIX (#1 & #3): runFutureForecast() cuma butuh 110 baris terakhir,
+  // tapi sebelumnya pakai getQoSHistoryAsc() yang menarik SELURUH
+  // tabel (bisa puluhan ribu baris setelah monitoring jalan lama)
+  // lalu di-slice di Dart. Itu bikin query SELECT lama -> mengunci
+  // tabel data_qos lama -> insert data aktual dari background isolate
+  // ikut tertahan selama proses prediksi.
+  //
+  // Versi ini langsung ORDER BY timestamp DESC + LIMIT di level SQL
+  // (pakai index idx_qos_ts), jauh lebih cepat dan tidak menahan lock
+  // lama-lama, lalu dibalik ke ASC supaya urutannya tetap kronologis
+  // seperti yang dibutuhkan model.
+  // =========================================================
+  static Future<List<Map<String, dynamic>>> getQoSHistoryRecent({
+    int limit = 110,
+  }) async {
+    final db   = await database;
+    final rows = await db.query(
+      'data_qos',
+      orderBy: 'timestamp DESC',
+      limit:   limit,
+    );
+    final asc = rows.reversed.toList();
+    print('📊 HISTORY RECENT: ${asc.length}/$limit rows → dikirim ke backend');
+    return asc;
+  }
 
   // =========================================================
   // GET HISTORY DAYS
@@ -242,6 +329,7 @@ class DBHelper {
     required DateTime forecastTime,
     required double   predictedQos,
     required int      horizonMinutes,
+    required int      intervalMinutes, 
     required String   modelName,
   }) async {
     final db = await database;
@@ -249,6 +337,7 @@ class DBHelper {
       'forecast_time':   forecastTime.toIso8601String(),
       'predicted_qos':   predictedQos,
       'horizon_minutes': horizonMinutes,
+      'interval_minutes': intervalMinutes,
       'model_name':      modelName,
       'created_at':      DateTime.now().toIso8601String(),
     });
@@ -282,6 +371,105 @@ class DBHelper {
       )
     ''');
   }
+
+  static Future<void> clearAllForecast() async {
+  final db    = await database;
+  final count = await db.delete('forecast_qos');
+  print('🧹 forecast_qos direset total ($count baris dihapus)');
+}
+
+// =========================================================
+  // GET LATEST FORECAST BATCH
+  //
+  // Mengambil semua baris forecast_qos dari sesi forecast TERAKHIR
+  // saja (dikelompokkan berdasarkan created_at yang sama).
+  // Dipakai untuk validasi MAE per-sesi, bukan rata-rata historis
+  // seluruh forecast yang pernah dibuat.
+  // =========================================================
+ static Future<List<Map<String, dynamic>>> getLatestForecastBatch() async {
+    final db = await database;
+
+    // Ambil semua forecast, urut dari yang terbaru.
+    final allDesc = await db.query(
+      'forecast_qos',
+      orderBy: 'created_at DESC',
+    );
+    if (allDesc.isEmpty) return [];
+
+    // Gap-based grouping: mulai dari baris terbaru, lalu masukkan baris
+    // berikutnya ke batch yang sama HANYA jika jaraknya dengan baris
+    // sebelumnya (dalam urutan DESC) tidak lebih dari toleransi singkat.
+    // Ini menghindari menarik batch forecast SEBELUMNYA yang kebetulan
+    // jatuh dalam window absolut, terutama saat user menjalankan forecast
+    // berkali-kali dalam jeda singkat (misal saat testing manual).
+    const gapTolerance = Duration(seconds: 5);
+
+    final batch = <Map<String, dynamic>>[allDesc.first];
+    DateTime cursor = DateTime.parse(allDesc.first['created_at'] as String);
+
+    for (int i = 1; i < allDesc.length; i++) {
+      final rowTime = DateTime.parse(allDesc[i]['created_at'] as String);
+      final gap = cursor.difference(rowTime); // cursor selalu >= rowTime krn DESC
+
+      if (gap <= gapTolerance) {
+        batch.add(allDesc[i]);
+        cursor = rowTime;
+      } else {
+        // Gap terlalu jauh — baris ini (dan seterusnya) milik batch lama.
+        break;
+      }
+    }
+
+    batch.sort((a, b) =>
+        (a['horizon_minutes'] as int).compareTo(b['horizon_minutes'] as int));
+    return batch;
+  }
+
+  // =========================================================
+  // GET MAE FOR LATEST BATCH
+  //
+  // Mengembalikan MAE rata-rata HANYA dari batch forecast terakhir,
+  // dan HANYA jika seluruh titik di batch itu sudah punya actual_qos
+  // (artinya sudah benar2 melewati window evaluasinya, bukan numpuk
+  // dari evaluasi forecast lama).
+  //
+  // Return null kalau:
+  //  - belum ada forecast sama sekali
+  //  - batch terakhir belum ada satupun titik yang tereval
+  // =========================================================
+  static Future<Map<String, dynamic>?> getLatestBatchEvaluation() async {
+    final batch = await getLatestForecastBatch();
+    if (batch.isEmpty) return null;
+
+    final evaluated = batch.where((f) => f['actual_qos'] != null).toList();
+
+    if (evaluated.isEmpty) {
+      // Belum ada satupun titik di batch ini yang tereval —
+      // berarti masih dalam masa tunggu (< horizon pertama, 30 mnt)
+      return {
+        'status': 'pending',
+        'totalPoints': batch.length,
+        'evaluatedPoints': 0,
+        'avgMae': null,
+        'forecastTime': batch.first['forecast_time'],
+      };
+    }
+
+    final sumMae = evaluated.fold<double>(
+      0.0,
+      (sum, f) => sum + (f['mae'] as num).toDouble(),
+    );
+    final avgMae = sumMae / evaluated.length;
+
+    return {
+      'status': evaluated.length == batch.length ? 'complete' : 'partial',
+      'totalPoints': batch.length,
+      'evaluatedPoints': evaluated.length,
+      'avgMae': avgMae,
+      'forecastTime': batch.first['forecast_time'],
+    };
+  }
+
 
   // =========================================================
   // EVALUASI FORECAST — isi actual_qos & mae
@@ -349,33 +537,6 @@ class DBHelper {
             'actual=${actualQos.toStringAsFixed(2)} '
             'mae=${mae.toStringAsFixed(2)}');
     }
-  }
-
-  // =========================================================
-  // GET EVALUATED FORECASTS — untuk ditampilkan di UI
-  // =========================================================
-  static Future<List<Map<String, dynamic>>> getEvaluatedForecasts({
-    int limit = 1000,
-  }) async {
-    final db = await database;
-    return await db.query(
-      'forecast_qos',
-      where:   'actual_qos IS NOT NULL',
-      orderBy: 'forecast_time DESC',
-      limit:   limit,
-    );
-  }
-
-  // =========================================================
-  // GET AVERAGE MAE — akurasi keseluruhan model
-  // =========================================================
-  static Future<double?> getAverageMAE() async {
-    final db     = await database;
-    final result = await db.rawQuery(
-      'SELECT AVG(mae) as avg_mae FROM forecast_qos WHERE mae IS NOT NULL',
-    );
-    if (result.isEmpty || result.first['avg_mae'] == null) return null;
-    return (result.first['avg_mae'] as num).toDouble();
   }
 
   // =========================================================
