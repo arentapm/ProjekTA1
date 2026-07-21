@@ -10,19 +10,18 @@ Aplikasi monitoring dan prediksi kualitas layanan (QoS) jaringan WiFi berbasis t
 
 ## 📁 Struktur Proyek
 
-├── backend/
-│ ├── main.py 
-│ ├── models/
-│ │ ├── model_qos_dengan_MSSA.keras
-│ │ ├── scaler_feat.pkl
-│ │ └── config.json
-│ └── requirements.txt
-│ 
-│
-└── mobile_app/
-├── lib/
-├── pubspec.yaml
-└── android/
+**backend/**
+- main.py — Entry point FastAPI
+- models/
+  - model_qos_dengan_MSSA.keras
+  - scaler_feat.pkl
+  - config.json
+- requirements.txt
+
+**mobile_app/**
+- lib/
+- pubspec.yaml
+- android/
 
 ---
 
