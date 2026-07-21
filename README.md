@@ -206,4 +206,4 @@ Pembimbing:
 ## 📄 Lisensi
 
 Proyek ini dibuat untuk keperluan Tugas Akhir (Akademik). 
-````
+---
