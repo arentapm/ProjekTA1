@@ -31,7 +31,7 @@ Aplikasi monitoring dan prediksi kualitas layanan (QoS) jaringan WiFi berbasis t
 | Komponen | Versi Minimal |
 |---|---|
 | Python | 3.10+ (disarankan 3.13 sesuai penelitian) |
-| Flutter SDK | 3.x |
+Flutter SDK | 3.24.3 |
 | Android SDK | API 34 (Android 14) |
 | RAM | minimal 8 GB |
 
