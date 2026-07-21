@@ -12,6 +12,7 @@ Aplikasi monitoring dan prediksi kualitas layanan (QoS) jaringan WiFi berbasis t
 
 **backend/**
 - main.py — Entry point FastAPI
+- pipline.py
 - models/
   - model_qos_dengan_MSSA.keras
   - scaler_feat.pkl
