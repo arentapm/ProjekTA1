@@ -205,7 +205,5 @@ Pembimbing:
 
 ## 📄 Lisensi
 
-Proyek ini dibuat untuk keperluan Tugas Akhir (Akademik). # TODO: sesuaikan lisensi jika akan dipublikasikan.
+Proyek ini dibuat untuk keperluan Tugas Akhir (Akademik). 
 ````
-
-Bagian yang saya tandai `# TODO` (URL repo, path config Flutter, port/IP, lisensi) silakan disesuaikan dengan struktur project asli kamu — kalau kamu share struktur folder/file config API yang sebenarnya, saya bisa perbaiki detail path dan nama file-nya biar 100% akurat.
