@@ -33,7 +33,7 @@ Aplikasi monitoring dan prediksi kualitas layanan (QoS) jaringan WiFi berbasis t
 | Python | 3.10+ (disarankan 3.13 sesuai penelitian) |
 | Flutter SDK | 3.x |
 | Android SDK | API 34 (Android 14) |
-| RAM | 8 GB (disarankan 16 GB untuk training ulang model) |
+| RAM | minimal 8 GB |
 
 ---
 
@@ -41,7 +41,7 @@ Aplikasi monitoring dan prediksi kualitas layanan (QoS) jaringan WiFi berbasis t
 
 ### 1.1 Clone & masuk ke folder backend
 ````bash
-git clone <URL_REPO_ANDA>   # TODO: ganti dengan URL repo
+git clone <https://github.com/arentapm/backendML1.git>   
 cd backend
 ````
 
@@ -134,7 +134,7 @@ flutter pub get
 Buka file konfigurasi API (misal `lib/config/api_config.dart`) dan sesuaikan alamat backend:
 
 ````dart
-// TODO: sesuaikan dengan IP backend Anda
+// sesuaikan dengan IP backend Anda
 const String baseUrl = "http://192.168.x.x:8000";
 ````
 
