@@ -7,17 +7,6 @@ import '../database/db_helper.dart';
 
 // ════════════════════════════════════════════════════════════════════
 // QosTaskHandler — berjalan di isolate TERPISAH dari main isolate
-//
-// FIX UTAMA:
-// 1. MonitoringController DIHAPUS dari sini — singleton tidak shared
-//    antar isolate, menyebabkan history selalu kosong
-// 2. Seluruh logika poll, buffer, DB insert dipindah ke sini langsung
-// 3. Guard duplicate timestamp pada file rx_bytes.txt
-// 4. SINR cache dengan TTL 30 detik
-// 5. [NEW FIX] requestPermission DIHAPUS dari onStart —
-//    permission_handler butuh Activity Android yang tidak tersedia
-//    di background isolate → PlatformException. Permission harus
-//    diminta dari UI (DashboardPage) sebelum service distart.
 // ════════════════════════════════════════════════════════════════════
 
 @pragma('vm:entry-point')
@@ -57,27 +46,12 @@ class QosTaskHandler extends TaskHandler {
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
     print('[TaskHandler] START');
 
-    // ✅ FIX: requestPermission DIHAPUS dari sini.
-    //
-    // Root cause error:
-    //   PlatformException(PermissionHandler.PermissionManager,
-    //   Unable to detect current Android Activity., null, null)
-    //
-    // permission_handler membutuhkan Activity Android yang aktif
-    // untuk menampilkan dialog permission. Background isolate
-    // (flutter_foreground_task) tidak memiliki Activity →
-    // PlatformException crash.
-    //
-    // Solusi: permission HARUS diminta dari UI (DashboardPage._startMonitoring)
-    // SEBELUM service ini distart. Lihat dashboard_page.dart.
-    //
-    // Di sini hanya log, tidak ada permission request sama sekali.
+    // Di sini hanya log, tidak ada permission request.
     print('[TaskHandler] isolate siap, permission sudah dihandle di UI');
   }
 
   @override
   void onRepeatEvent(DateTime timestamp) async {
-    // ✅ Semua logika ada di sini, tidak bergantung pada singleton
     // Baca throughput dari file Kotlin
     await _readThroughputFromFile();
 
@@ -127,8 +101,6 @@ class QosTaskHandler extends TaskHandler {
 
       if (rx < 0 || ts <= 0) return;
 
-      // FIX: Skip jika file belum diupdate (timestamp sama)
-      // Ini root cause throughput frozen
       if (ts == _lastProcessedTs) {
         print('[TaskHandler] file belum diupdate (ts=$ts sama), skip throughput');
         return;
@@ -177,9 +149,7 @@ class QosTaskHandler extends TaskHandler {
     _isPollBusy = true;
 
     try {
-      // ✅ FIX: Gunakan hasPermission() — hanya CEK status,
-      // tidak memanggil dialog, aman di background isolate.
-      // Berbeda dengan requestPermission() yang butuh Activity.
+      //  hasPermission() — hanya CEK status,
       final hasPermission = await NetworkService.hasPermission();
       if (!hasPermission) {
         print('[TaskHandler] permission belum diberikan, skip poll');

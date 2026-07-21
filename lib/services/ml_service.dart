@@ -51,12 +51,10 @@ class MLService {
   // /predict_future — START JOB
   //
   // Mengirim 110 baris data + interval yang dipilih user (5 atau 30),
-  // backend langsung balas job_id (instan, tidak menunggu proses
-  // forecast selesai).
+  // backend langsung balas job_id 
   //
-  // FIX: sekarang WAJIB mengirim `intervalMinutes` di body request,
-  // supaya backend tahu mode mana yang dijalankan:
-  //   - 5  -> hanya 300 step (≈5 menit simulasi) → cepat, cocok demo
+  // WAJIB mengirim `intervalMinutes` di body request,supaya backend tahu mode mana yang dijalankan:
+  //   - 5  -> hanya 300 step (≈5 menit simulasi) 
   //   - 30 -> 4 titik x 30 menit = total 2 jam simulasi
   //
   // Return:
@@ -67,7 +65,7 @@ class MLService {
   // =========================================================
   static Future<Map<String, dynamic>?> startForecastFutureJob({
     required List<List<double>> inputData,
-    required int intervalMinutes, // FIX: parameter baru, wajib diisi (5 atau 30)
+    required int intervalMinutes, // parameter baru, wajib diisi (5 atau 30)
   }) async {
     try {
       print('[MLService] Mengirim ke $baseUrl/predict_future');
@@ -78,7 +76,7 @@ class MLService {
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'input': inputData,
-          'interval_minutes': intervalMinutes, // FIX: dikirim ke backend
+          'interval_minutes': intervalMinutes, // dikirim ke backend
         }),
       ).timeout(const Duration(seconds: 20));
 
@@ -131,7 +129,7 @@ class MLService {
   //   {'status': 'success', 'progress': 100,
   //    'predictions_5m_detail': [...], 'predictions_30m': [...]}
   //   {'status': 'error', 'message': '...'}
-  //   null  → gagal hubungi server (network error, dsb) — caller boleh retry
+  //   null  → gagal hubungi server
   // =========================================================
   static Future<Map<String, dynamic>?> pollForecastFutureJob({
     required String jobId,

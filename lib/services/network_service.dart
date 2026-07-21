@@ -289,9 +289,6 @@ static Future<bool> _isHostReachable(String host) async {
   // Ambang "berdekatan": ≤20 MHz untuk 5 GHz, <25 MHz untuk 2.4 GHz
   // (mengikuti lebar channel WiFi standar).
   //
-  // Referensi:
-  //   Goldsmith, "Wireless Communications", Cambridge UP, 2005.
-  //   IEEE 802.11-2020 Standard, Annex E.
   // ════════════════════════════════════════════════════════════════
 
   static double estimateSINR({
@@ -311,7 +308,7 @@ static Future<bool> _isHostReachable(String host) async {
       return is5GHzBand ? 5.0 : 3.0;
     }
 
-    // Noise floor (karakteristik fisik, IEEE 802.11-2020 Annex E)
+    // Noise floor (karakteristik fisik, IEEE 802.11)
     final double noiseFloorDbm = is5GHzBand ? -95.0 : -92.0;
 
     // ── Jumlahkan interferensi, dibedakan co-channel vs adjacent ──
@@ -503,10 +500,7 @@ static Future<bool> _isHostReachable(String host) async {
   // ════════════════════════════════════════════════════════════════
   // WIFI SNAPSHOT
   //
-  // FIX: Fungsi ini dipanggil dari background isolate (_runPoll).
-  // Semua fungsi yang dipanggil di sini tidak boleh memanggil
-  // requestPermission() — sudah diperbaiki di getSSID, getBSSID,
-  // getIPAddress, dan getScanNeighborAPs di bawah.
+  // Fungsi ini dipanggil dari background isolate (_runPoll).
   // ════════════════════════════════════════════════════════════════
 
   static Future<WiFiSnapshot> getWifiSnapshot() async {
@@ -526,7 +520,6 @@ static Future<bool> _isHostReachable(String host) async {
       print('[NetworkService] scan tetangga gagal: $e');
     }
 
-    // ✅ Pakai frekuensi asli (currentChannelMhz), bukan cuma flag
     // is5GHz — diperlukan untuk membedakan co-channel vs
     // adjacent-channel pada model interferensi IEEE 802.11.
     final sinr = estimateSINR(
@@ -551,8 +544,7 @@ static Future<bool> _isHostReachable(String host) async {
   // ════════════════════════════════════════════════════════════════
   // INFO JARINGAN
   //
-  // FIX: requestPermission() DIHAPUS dari getSSID, getBSSID,
-  // getIPAddress — fungsi-fungsi ini bisa dipanggil dari background
+  // fungsi-fungsi ini bisa dipanggil dari background
   // isolate via getWifiSnapshot(). Ganti dengan hasPermission() check.
   //
   // requestPermission() tetap ada sebagai fungsi publik untuk
@@ -560,21 +552,21 @@ static Future<bool> _isHostReachable(String host) async {
   // ════════════════════════════════════════════════════════════════
 
   static Future<String> getSSID() async {
-    // ✅ FIX: cek saja, tidak request
+    // cek saja, tidak request
     if (!await hasPermission()) return 'Unknown';
     final ssid = await _info.getWifiName();
     return ssid?.replaceAll('"', '') ?? 'Unknown';
   }
 
   static Future<String> getBSSID() async {
-    // ✅ FIX: cek saja, tidak request
+    //cek saja, tidak request
     if (!await hasPermission()) return 'Unknown';
     final bssid = await _info.getWifiBSSID();
     return bssid ?? 'Unknown';
   }
 
   static Future<String> getIPAddress() async {
-    // ✅ FIX: cek saja, tidak request
+    // cek saja, tidak request
     if (!await hasPermission()) return '0.0.0.0';
     final ip = await _info.getWifiIP();
     return ip ?? '0.0.0.0';

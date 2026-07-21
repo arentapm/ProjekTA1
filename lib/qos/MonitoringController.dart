@@ -57,51 +57,71 @@ class MonitoringController {
 
   int get exportBufferLength => _exportBufferLength;
 
+// =========================================================
+  // SKOR PER PARAMETER (1-4) 
+  // Python (score_throughput / score_delay / score_jitter / score_sinr)
+  // =========================================================
+
+  int _scoreThroughput(double x) {
+    if (x >= 75) return 4;
+    if (x >= 50) return 3;
+    if (x >= 25) return 2;
+    return 1;
+  }
+
+  int _scoreDelay(double x) {
+    if (x < 150) return 4;
+    if (x < 300) return 3;
+    if (x < 450) return 2;
+    return 1;
+  }
+
+  int _scoreJitter(double x) {
+    if (x == 0) return 4;
+    if (x < 75) return 3;
+    if (x <= 125) return 2;
+    return 1;
+  }
+
+  int _scoreSinr(double x) {
+    if (x > 20) return 4;
+    if (x >= 15) return 3;
+    if (x >= 0) return 2;
+    return 1;
+  }
+
   // =========================================================
   // QOS INDEX CALCULATION
-  // =========================================================
-  //
-  // WAJIB sama dengan formula training backend
+
+  //   1. Setiap parameter mentah -> skor kategorikal 1-4
+  //   2. Rata-rata skor (avg)
+  //   3. avg -> persentase QoS via mapping piecewise 25-100
   //
   // =========================================================
 
   double calculateQoSIndex(DataQoS d) {
+    final scores = [
+      _scoreThroughput(d.throughput),
+      _scoreDelay(d.delay),
+      _scoreJitter(d.jitter),
+      _scoreSinr(d.sinr),
+    ];
 
-    // Throughput normalization
-    final tNorm =
-        (d.throughput / 20000)
-            .clamp(0.0, 1.0);
+    final avg =
+        scores.reduce((a, b) => a + b) / scores.length;
 
-    // Delay normalization
-    final dNorm =
-        1 -
-        (d.delay / 600)
-            .clamp(0.0, 1.0);
+    double qos;
+    if (avg >= 3.8) {
+      qos = 95 + ((avg - 3.8) / (4.0 - 3.8)) * 5;
+    } else if (avg >= 3.0) {
+      qos = 75 + ((avg - 3.0) / (3.79 - 3.0)) * (94.75 - 75);
+    } else if (avg >= 2.0) {
+      qos = 50 + ((avg - 2.0) / (2.99 - 2.0)) * (74.75 - 50);
+    } else {
+      qos = 25 + ((avg - 1.0) / (1.99 - 1.0)) * (49.75 - 25);
+    }
 
-    // Jitter normalization
-    final jNorm =
-        1 -
-        (d.jitter / 300)
-            .clamp(0.0, 1.0);
-
-    // SINR normalization
-    final sNorm =
-        (d.sinr / 40)
-            .clamp(0.0, 1.0);
-
-    final qos = (
-
-      tNorm * 0.35 +
-
-      dNorm * 0.30 +
-
-      jNorm * 0.20 +
-
-      sNorm * 0.15
-
-    ) * 100;
-
-    return qos.clamp(0, 100);
+    return qos.clamp(25, 100);
   }
 
   // =========================================================

@@ -1,15 +1,3 @@
-// ════════════════════════════════════════════════════════════════════
-// DataQoS — model sesuai tabel data_qos di ERD
-//
-// Kolom tabel:
-//   id_qos     INTEGER PK
-//   timestamp  DATETIME
-//   throughput FLOAT
-//   delay      FLOAT
-//   jitter     FLOAT
-//   sinr       FLOAT
-//
-// ════════════════════════════════════════════════════════════════════
 class DataQoS {
   final int?     idQos;
   final DateTime timestamp;

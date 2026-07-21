@@ -80,7 +80,7 @@ class ForecastController {
   // =========================================================
   // RUN FUTURE FORECAST — ASYNC JOB + POLLING
   //
-  // FIX: `intervalMinutes` sekarang diteruskan ke
+  // `intervalMinutes`  diteruskan ke
   // MLService.startForecastFutureJob(), sehingga backend hanya
   // menjalankan step yang relevan dengan mode yang dipilih user:
   //   - 5  menit -> 300 step   (cepat, cocok didemokan)
